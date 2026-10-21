@@ -75,9 +75,15 @@ Available tools:
 - `chat`: send a prompt through the existing configured model and provider policy.
 - `reset_conversation`: delete one of the authenticated user's active in-memory conversations.
 
-MCP does not add web search, filesystem access, shell execution, or external app integrations.
-Those should be added individually with explicit permission boundaries. The existing OpenRouter
-Zero Data Retention request and disabled provider fallbacks remain unchanged.
+MCP does not add filesystem access, shell execution, or external app integrations. Web research is exposed separately through the authenticated `/v1/research` endpoint; it uses Brave Search when `BRAVE_SEARCH_API_KEY` is configured and otherwise attempts a best-effort DuckDuckGo HTML fallback, which may be rate-limited. The existing OpenRouter Zero Data Retention request and disabled provider fallbacks remain unchanged.
+
+## Capability workflows
+
+The browser UI includes authenticated workflows for document analysis, code review, memory save/list/delete, and task-plan creation/listing/step updates. Code review analyzes submitted code and does not execute it. Document uploads are limited to 3 MB and supported text, source, CSV, DOCX, and PDF formats; extracted content is bounded before it is sent to the configured model. Task plans track steps and statuses but do not autonomously execute them.
+
+Memory and task data use PostgreSQL when `DATABASE_URL` is configured. Without it, the service falls back to local SQLite at `RZ_LOCAL_DATA_PATH` (or `~/.rz-ai-agent/capabilities.sqlite3`). Local SQLite is suitable for development but may not survive restarts or replacements on an ephemeral hosting service; use a persistent PostgreSQL database for durable hosted data. The `/v1/tools` and `/v1/capabilities` endpoints report configuration status without exposing credentials.
+
+Image generation requires `IMAGE_GENERATION_ENDPOINT`, `IMAGE_GENERATION_API_KEY`, and `IMAGE_GENERATION_MODEL`; the endpoint must use HTTPS and implement the OpenAI-compatible image-generation response shape. It is not available until a compatible provider is configured and verified.
 
 MCP initialize example (replace the key locally; never paste a real key into shared logs):
 
