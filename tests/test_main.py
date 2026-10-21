@@ -117,3 +117,22 @@ def test_openrouter_endpoint_accepts_host_only(app):
     assert app._openrouter_chat_completions_url(
         "https://us.openrouter.ai"
     ) == "https://us.openrouter.ai/api/v1/chat/completions"
+
+
+def test_task_model_routing_uses_configured_coding_model(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "example/coding-model")
+    monkeypatch.setattr(app, "OPENROUTER_ANALYSIS_MODEL", "")
+    assert app._select_model_for_task("Please debug this Python traceback") == "example/coding-model"
+
+
+def test_task_model_routing_uses_configured_analysis_model(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "")
+    monkeypatch.setattr(app, "OPENROUTER_ANALYSIS_MODEL", "example/analysis-model")
+    assert app._select_model_for_task("Compare these options and analyze the tradeoffs") == "example/analysis-model"
+
+
+def test_task_model_routing_preserves_default_and_explicit_override(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_MODEL", "example/default-model")
+    monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "example/coding-model")
+    assert app._select_model_for_task("Tell me a joke") == "example/default-model"
+    assert app._select_model_for_task("Debug this code", "example/manual-model") == "example/manual-model"
