@@ -42,3 +42,8 @@ Every OpenRouter request continues to send `provider.zdr: true` and
 `allow_fallbacks: false`; routing does not weaken those privacy controls.
 Do not set either optional model until its available endpoint has been checked
 against the account's provider allowlist and ZDR requirements.
+
+When an OpenRouter key is configured, the app will not fall back to Hermes after
+an OpenRouter error, because Hermes' endpoint has not been verified for this
+ZDR requirement. It returns a clear failure instead. Hermes can be used as the
+primary provider only when OpenRouter is not configured.
