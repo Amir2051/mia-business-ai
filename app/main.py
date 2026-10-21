@@ -287,9 +287,15 @@ def _complete_message(
     max_tokens,
 ) -> ChatResponse:
     providers = []
-    if OPENROUTER_API_KEY and not _is_placeholder(OPENROUTER_API_KEY):
+    openrouter_configured = bool(
+        OPENROUTER_API_KEY and not _is_placeholder(OPENROUTER_API_KEY)
+    )
+    if openrouter_configured:
+        # Privacy guard: never fail over from OpenRouter's enforced ZDR route
+        # to an external provider whose ZDR eligibility has not been verified.
         providers.append(("openrouter", _call_openrouter))
-    if HERMES_ENABLED:
+    elif HERMES_ENABLED:
+        # Hermes may be used as the primary only when OpenRouter is not configured.
         providers.append(("hermes", _call_hermes))
 
     result = None
