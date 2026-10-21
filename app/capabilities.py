@@ -257,7 +257,14 @@ def capabilities() -> dict:
         'chat': {'available': True},
         'github': {'available': True, 'read_only': True, 'owner_scope': 'Amir2051'},
         'web_research': {'available': True, 'provider_configured': bool(os.getenv('BRAVE_SEARCH_API_KEY','').strip()), 'fallback': 'DuckDuckGo HTML (may be rate-limited)', 'configuration_required_for_reliable_search': ['brave_search_api_key'] if not os.getenv('BRAVE_SEARCH_API_KEY','').strip() else [], 'max_results': MAX_RESULTS},
-        'image_generation': {'available': bool(os.getenv('IMAGE_GENERATION_ENDPOINT','').strip() and os.getenv('IMAGE_GENERATION_API_KEY','').strip() and os.getenv('IMAGE_GENERATION_MODEL','').strip()), 'configuration_required': ['image_endpoint','image_api_key','image_model']},
+        'image_generation': {
+            'available': bool((os.getenv('IMAGE_GENERATION_API_KEY','').strip() or os.getenv('OPENROUTER_API_KEY','').strip())
+                              and (os.getenv('IMAGE_GENERATION_ENDPOINT','https://openrouter.ai/api/v1/images').strip().startswith('https://'))
+                              and (os.getenv('IMAGE_GENERATION_MODEL','bytedance-seed/seedream-4.5').strip() or 'bytedance-seed/seedream-4.5')),
+            'provider': 'openrouter' if not os.getenv('IMAGE_GENERATION_ENDPOINT','').strip() or 'openrouter.ai' in os.getenv('IMAGE_GENERATION_ENDPOINT','') else 'custom',
+            'model': os.getenv('IMAGE_GENERATION_MODEL','bytedance-seed/seedream-4.5').strip() or 'bytedance-seed/seedream-4.5',
+            'configuration_required': [] if (os.getenv('IMAGE_GENERATION_API_KEY','').strip() or os.getenv('OPENROUTER_API_KEY','').strip()) else ['openrouter_api_key'],
+        },
         'persistent_memory': {'available': True, 'storage': 'postgres' if os.getenv('DATABASE_URL','').strip() else 'local_sqlite', 'durable_across_host_restarts': bool(os.getenv('DATABASE_URL','').strip()), 'warning': None if os.getenv('DATABASE_URL','').strip() else 'Local SQLite may not survive ephemeral-host restarts or replacements'},
         'task_orchestration': {'available': True, 'max_steps': 20, 'execution': 'explicit step tracking; no arbitrary code execution'},
         'document_handling': {'available': True, 'formats': ['txt','md','source code','json','csv','docx','pdf'], 'max_upload_bytes': 3000000, 'max_extracted_characters': 40000},
