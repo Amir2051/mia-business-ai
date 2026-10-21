@@ -82,21 +82,39 @@ def test_reset_clears_conversation(app, monkeypatch):
     assert "prior" not in resp.reply  # reset removed prior context
 
 
-def test_hermes_default_provider_fallback(app, monkeypatch):
+def test_does_not_fallback_to_unverified_hermes_when_openrouter_is_configured(app, monkeypatch):
     def fake_openrouter(messages, model, temperature, max_tokens):
-        raise RuntimeError("openrouter should not be called")
+        raise RuntimeError("ZDR endpoint unavailable")
 
     def fake_hermes(messages, model, temperature, max_tokens):
-        return {"choices": [{"message": {"content": "hermes reply"}}]}
+        raise AssertionError("must not route to Hermes after OpenRouter failure")
 
+    monkeypatch.setattr(app, "HERMES_ENABLED", True)
     with mock.patch.object(app, "_call_openrouter", fake_openrouter), \
          mock.patch.object(app, "_call_hermes", fake_hermes):
-        resp = app._complete_message(
-            "s", "from hermes", "sess2", None, None, None
-        )
+        with pytest.raises(HTTPException) as exc:
+            app._complete_message(
+                "s", "from hermes", "sess2", "example/openrouter-model", None, None
+            )
 
-    assert resp.reply == "hermes reply"
+    assert exc.value.status_code == 502
+    assert "ZDR endpoint unavailable" in exc.value.detail
+
+
+def test_hermes_can_be_primary_when_openrouter_is_not_configured(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(app, "HERMES_ENABLED", True)
+
+    def fake_hermes(messages, model, temperature, max_tokens):
+        assert model == app.HERMES_MODEL
+        return {"choices": [{"message": {"content": "hermes primary reply"}}]}
+
+    with mock.patch.object(app, "_call_hermes", fake_hermes):
+        resp = app._complete_message("s", "hello", "sess3", None, None, None)
+
+    assert resp.reply == "hermes primary reply"
     assert resp.provider == "hermes"
+    assert resp.model == app.HERMES_MODEL
 
 
 def test_openrouter_endpoint_accepts_regional_api_base_urls(app):
@@ -117,3 +135,22 @@ def test_openrouter_endpoint_accepts_host_only(app):
     assert app._openrouter_chat_completions_url(
         "https://us.openrouter.ai"
     ) == "https://us.openrouter.ai/api/v1/chat/completions"
+
+
+def test_task_model_routing_uses_configured_coding_model(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "example/coding-model")
+    monkeypatch.setattr(app, "OPENROUTER_ANALYSIS_MODEL", "")
+    assert app._select_model_for_task("Please debug this Python traceback") == "example/coding-model"
+
+
+def test_task_model_routing_uses_configured_analysis_model(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "")
+    monkeypatch.setattr(app, "OPENROUTER_ANALYSIS_MODEL", "example/analysis-model")
+    assert app._select_model_for_task("Compare these options and analyze the tradeoffs") == "example/analysis-model"
+
+
+def test_task_model_routing_preserves_default_and_explicit_override(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_MODEL", "example/default-model")
+    monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "example/coding-model")
+    assert app._select_model_for_task("Tell me a joke") == "example/default-model"
+    assert app._select_model_for_task("Debug this code", "example/manual-model") == "example/manual-model"
