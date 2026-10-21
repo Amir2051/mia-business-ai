@@ -264,7 +264,51 @@ def _complete_message(
             break
         except HTTPException:
             raise
+        except HTTPError as exc:
+            # Log only provider/model and the provider's structured error message.
+            # Never log authorization headers, prompts, or response content.
+            upstream_code = None
+            upstream_message = ""
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8"))
+                error_info = error_payload.get("error", {})
+                if isinstance(error_info, dict):
+                    upstream_code = error_info.get("code")
+                    upstream_message = str(error_info.get("message", ""))[:240]
+                elif isinstance(error_info, str):
+                    upstream_message = error_info[:240]
+            except Exception:
+                pass
+            provider_model = (
+                model or OPENROUTER_MODEL if name == "openrouter"
+                else model or HERMES_MODEL
+            )
+            print(
+                "RZ_PROVIDER_ERROR",
+                {
+                    "provider": name,
+                    "status": exc.code,
+                    "provider_code": upstream_code,
+                    "provider_message": upstream_message,
+                    "model": provider_model,
+                },
+                flush=True,
+            )
+            last_error = RuntimeError(
+                f"{name} HTTP {exc.code}"
+                + (f" ({upstream_message})" if upstream_message else "")
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 - fallback to next provider
+            print(
+                "RZ_PROVIDER_ERROR",
+                {
+                    "provider": name,
+                    "error_type": type(exc).__name__,
+                    "model": model or (OPENROUTER_MODEL if name == "openrouter" else HERMES_MODEL),
+                },
+                flush=True,
+            )
             last_error = exc
             continue
 
