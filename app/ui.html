@@ -88,7 +88,6 @@ input,textarea,select{background:#07111d;border-color:#234257;border-radius:11px
      }
     }return;
    }
-   }
    if(choice.trim().toLowerCase()!=='create'){addBubble('Choose "create" or "list" to use the task tracker.','error');return}
    const title=window.prompt('Task title:');if(!title||!title.trim())return;
    const rawSteps=window.prompt('Enter task steps, one per line (1–20 steps):','Plan\nImplement\nTest');if(!rawSteps)return;
