@@ -194,7 +194,29 @@ def _github_tool_call(name: str, arguments: dict) -> dict:
         endpoint = f"{base}/contents/{quote(file_path, safe='/')}"
         if ref:
             endpoint += f"?ref={quote(ref, safe='')}"
-        data = _github_request(endpoint)
+        try:
+            data = _github_request(endpoint)
+        except ValueError as api_error:
+            # Public repositories can still serve raw files when GitHub's REST
+            # API rate limit is exhausted. This fallback is safe for private
+            # repositories: raw.githubusercontent.com will not return their files.
+            if "denied the request" not in str(api_error):
+                raise
+            raw_ref = quote(ref or "HEAD", safe="")
+            raw_path = "/".join(quote(part, safe="") for part in file_path.split("/"))
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_ALLOWED_OWNER}/{quote(repo, safe='')}/{raw_ref}/{raw_path}"
+            raw_request = URLRequest(raw_url, headers={"User-Agent": "RZ-Agent-GitHub-ReadOnly"}, method="GET")
+            try:
+                with urlopen(raw_request, timeout=12) as response:
+                    raw = response.read(30001)
+                content = raw.decode("utf-8")
+                return {"path": file_path, "size": len(raw), "html_url": f"https://github.com/{GITHUB_ALLOWED_OWNER}/{quote(repo, safe='')}/blob/{raw_ref}/{raw_path}", "content": content[:30000], "truncated": len(content) > 30000, "source": "raw_public_fallback"}
+            except HTTPError as raw_error:
+                if raw_error.code == 404:
+                    raise api_error
+                raise ValueError(f"GitHub raw file fallback failed with HTTP {raw_error.code}") from None
+            except (URLError, UnicodeDecodeError):
+                raise api_error
         if not isinstance(data, dict) or data.get("type") != "file":
             raise ValueError("The requested path is not a single file")
         content = data.get("content", "")
