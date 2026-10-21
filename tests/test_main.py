@@ -97,3 +97,23 @@ def test_hermes_default_provider_fallback(app, monkeypatch):
 
     assert resp.reply == "hermes reply"
     assert resp.provider == "hermes"
+
+
+def test_openrouter_endpoint_accepts_regional_api_base_urls(app):
+    assert app._openrouter_chat_completions_url(
+        "https://us.openrouter.ai/api/v1"
+    ) == "https://us.openrouter.ai/api/v1/chat/completions"
+    assert app._openrouter_chat_completions_url(
+        "https://eu.openrouter.ai/api/v1/"
+    ) == "https://eu.openrouter.ai/api/v1/chat/completions"
+
+
+def test_openrouter_endpoint_preserves_full_chat_url(app):
+    endpoint = "https://openrouter.ai/api/v1/chat/completions"
+    assert app._openrouter_chat_completions_url(endpoint) == endpoint
+
+
+def test_openrouter_endpoint_accepts_host_only(app):
+    assert app._openrouter_chat_completions_url(
+        "https://us.openrouter.ai"
+    ) == "https://us.openrouter.ai/api/v1/chat/completions"
