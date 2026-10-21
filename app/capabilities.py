@@ -38,10 +38,13 @@ class _DDGParser(HTMLParser):
     def _finish_result(self):
         if self.current and self.current.get("title") and self.current.get("url"):
             url = self.current["url"].strip()
-            # DuckDuckGo may wrap destinations in /l/?uddg=... redirects.
-            if url.startswith("/l/?"):
-                from urllib.parse import parse_qs, urlparse
-                url = parse_qs(urlparse(url).query).get("uddg", [""])[0]
+            # DuckDuckGo may wrap destinations in relative or absolute /l/?uddg= redirects.
+            from urllib.parse import parse_qs, urljoin, urlparse
+            if url.startswith("/") or url.startswith("//"):
+                url = urljoin("https://duckduckgo.com", url)
+            parsed = urlparse(url)
+            if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path == "/l/":
+                url = parse_qs(parsed.query).get("uddg", [""])[0]
             if url.startswith("https://") and not any(item["url"] == url for item in self.items):
                 self.current["url"] = url[:2000]
                 self.current["title"] = self.current["title"][:500]
