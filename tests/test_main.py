@@ -82,22 +82,39 @@ def test_reset_clears_conversation(app, monkeypatch):
     assert "prior" not in resp.reply  # reset removed prior context
 
 
-def test_hermes_default_provider_fallback(app, monkeypatch):
+def test_does_not_fallback_to_unverified_hermes_when_openrouter_is_configured(app, monkeypatch):
     def fake_openrouter(messages, model, temperature, max_tokens):
-        raise RuntimeError("openrouter should not be called")
+        raise RuntimeError("ZDR endpoint unavailable")
+
+    def fake_hermes(messages, model, temperature, max_tokens):
+        raise AssertionError("must not route to Hermes after OpenRouter failure")
+
+    monkeypatch.setattr(app, "HERMES_ENABLED", True)
+    with mock.patch.object(app, "_call_openrouter", fake_openrouter), \
+         mock.patch.object(app, "_call_hermes", fake_hermes):
+        with pytest.raises(HTTPException) as exc:
+            app._complete_message(
+                "s", "from hermes", "sess2", "example/openrouter-model", None, None
+            )
+
+    assert exc.value.status_code == 502
+    assert "ZDR endpoint unavailable" in exc.value.detail
+
+
+def test_hermes_can_be_primary_when_openrouter_is_not_configured(app, monkeypatch):
+    monkeypatch.setattr(app, "OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(app, "HERMES_ENABLED", True)
 
     def fake_hermes(messages, model, temperature, max_tokens):
         assert model == app.HERMES_MODEL
-        return {"choices": [{"message": {"content": "hermes reply"}}]}
+        return {"choices": [{"message": {"content": "hermes primary reply"}}]}
 
-    with mock.patch.object(app, "_call_openrouter", fake_openrouter), \
-         mock.patch.object(app, "_call_hermes", fake_hermes):
-        resp = app._complete_message(
-            "s", "from hermes", "sess2", "example/openrouter-model", None, None
-        )
+    with mock.patch.object(app, "_call_hermes", fake_hermes):
+        resp = app._complete_message("s", "hello", "sess3", None, None, None)
 
-    assert resp.reply == "hermes reply"
+    assert resp.reply == "hermes primary reply"
     assert resp.provider == "hermes"
+    assert resp.model == app.HERMES_MODEL
 
 
 def test_openrouter_endpoint_accepts_regional_api_base_urls(app):
