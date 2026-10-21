@@ -58,16 +58,46 @@ def test_research_input_validation(app,monkeypatch):
     monkeypatch.setattr(capabilities,'urlopen',lambda *a,**k: (_ for _ in ()).throw(AssertionError('network should not be called')))
     with pytest.raises(ValueError): capabilities.web_research('x',0)
 
-def test_image_generation_fails_honestly_when_unconfigured(app):
+def test_image_generation_uses_openrouter_image_api_and_shared_key(app,monkeypatch):
+    import json
+    from io import BytesIO
+    seen={}
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self,*args): return False
+        def read(self,n=-1):
+            return json.dumps({'data':[{'b64_json':'aGVsbG8=','media_type':'image/jpeg'}],'usage':{'cost':0.04}}).encode()
+    def fake_urlopen(req,timeout):
+        seen['url']=req.full_url
+        seen['headers']=req.headers
+        seen['body']=json.loads(req.data.decode())
+        seen['timeout']=timeout
+        return FakeResponse()
+    monkeypatch.setattr(app,'urlopen',fake_urlopen)
     client=TestClient(app.app)
-    response=client.post('/v1/images/generations',headers={'X-API-Key':'test-key'},json={'prompt':'a boy riding a horse'})
+    response=client.post('/v1/images/generations',headers={'X-API-Key':'test-key'},json={'prompt':'a cinematic mountain sunrise'})
+    assert response.status_code==200
+    result=response.json()
+    assert result['model']=='bytedance-seed/seedream-4.5'
+    assert result['image']['b64_json']=='aGVsbG8='
+    assert result['image']['media_type']=='image/jpeg'
+    assert result['usage']['cost']==0.04
+    assert seen['url']=='https://openrouter.ai/api/v1/images'
+    assert seen['headers']['Authorization']=='Bearer test-provider-key'
+    assert seen['body']=={'model':'bytedance-seed/seedream-4.5','prompt':'a cinematic mountain sunrise'}
+    assert seen['timeout']==120
+
+def test_image_generation_requires_openrouter_key(app,monkeypatch):
+    monkeypatch.setattr(app,'OPENROUTER_API_KEY','')
+    monkeypatch.delenv('IMAGE_GENERATION_API_KEY',raising=False)
+    client=TestClient(app.app)
+    response=client.post('/v1/images/generations',headers={'X-API-Key':'test-key'},json={'prompt':'a cinematic mountain sunrise'})
     assert response.status_code==503
-    assert 'not configured' in response.json()['detail']
+    assert 'OPENROUTER_API_KEY' in response.json()['detail']
 
 def test_image_generation_rejects_http_endpoint(app,monkeypatch):
     monkeypatch.setenv('IMAGE_GENERATION_ENDPOINT','http://insecure.example/generate')
     monkeypatch.setenv('IMAGE_GENERATION_API_KEY','test')
-    monkeypatch.setenv('IMAGE_GENERATION_MODEL','example/image-model')
     client=TestClient(app.app)
     response=client.post('/v1/images/generations',headers={'X-API-Key':'test-key'},json={'prompt':'a boy riding a horse'})
     assert response.status_code==503
