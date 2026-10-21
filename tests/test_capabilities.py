@@ -116,3 +116,41 @@ def test_code_review_is_bounded_and_does_not_execute(app, monkeypatch):
     assert result.json()['execution_performed'] is False
     bad=client.post('/v1/code/review',headers=h,json={'code':'x'*20001})
     assert bad.status_code==400
+
+def test_duckduckgo_parser_keeps_title_snippet_and_unwraps_https_destination():
+    from app.capabilities import _DDGParser
+    parser = _DDGParser()
+    parser.feed("""
+      <div class="result">
+        <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Farticle">Example title</a>
+        <a class="result__snippet">A useful <b>source</b> snippet.</a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="https://example.org/page">Second title</a>
+        <div class="result__snippet">Second snippet.</div>
+      </div>
+    """)
+    parser.finish()
+    assert parser.items == [
+        {"title": "Example title", "url": "https://example.com/article", "snippet": "A useful source snippet."},
+        {"title": "Second title", "url": "https://example.org/page", "snippet": "Second snippet."},
+    ]
+
+
+def test_duckduckgo_parser_rejects_non_https_destinations():
+    from app.capabilities import _DDGParser
+    parser = _DDGParser()
+    parser.feed('<a class="result__a" href="javascript:alert(1)">Unsafe</a>')
+    parser.finish()
+    assert parser.items == []
+
+
+def test_capability_status_discloses_local_sqlite_durability_limit(app, monkeypatch):
+    from app import capabilities
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    status = capabilities.capabilities()
+    assert status["persistent_memory"]["storage"] == "local_sqlite"
+    assert status["persistent_memory"]["durable_across_host_restarts"] is False
+    assert "may not survive" in status["persistent_memory"]["warning"]
+    assert status["web_research"]["available"] is True
+    assert status["web_research"]["provider_configured"] is False
