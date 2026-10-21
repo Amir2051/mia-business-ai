@@ -1057,21 +1057,24 @@ def code_review(payload: dict, current_user: dict = Depends(require_app_user)):
 
 @app.post("/v1/images/generations")
 def generate_image(payload: dict, current_user: dict = Depends(require_app_user)):
-    """Call an explicitly configured OpenAI-compatible image endpoint; never fake an image."""
-    endpoint = os.getenv("IMAGE_GENERATION_ENDPOINT", "").strip()
-    image_key = os.getenv("IMAGE_GENERATION_API_KEY", "").strip()
-    image_model = os.getenv("IMAGE_GENERATION_MODEL", "").strip()
+    """Generate a real image through OpenRouter's unified Image API."""
+    endpoint = os.getenv("IMAGE_GENERATION_ENDPOINT", "https://openrouter.ai/api/v1/images").strip()
+    image_key = os.getenv("IMAGE_GENERATION_API_KEY", "").strip() or OPENROUTER_API_KEY
+    image_model = os.getenv("IMAGE_GENERATION_MODEL", "bytedance-seed/seedream-4.5").strip() or "bytedance-seed/seedream-4.5"
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 2000:
         raise HTTPException(status_code=400, detail="prompt must contain 1–2000 characters")
-    if not endpoint or not image_key or not image_model:
-        raise HTTPException(status_code=503, detail="Image generation is not configured. Set IMAGE_GENERATION_ENDPOINT, IMAGE_GENERATION_API_KEY, and IMAGE_GENERATION_MODEL.")
+    if not image_key or not image_model or not endpoint:
+        raise HTTPException(status_code=503, detail="Image generation needs OPENROUTER_API_KEY (or IMAGE_GENERATION_API_KEY).")
     if not endpoint.startswith("https://"):
         raise HTTPException(status_code=503, detail="Image generation endpoint must use HTTPS")
-    req = URLRequest(endpoint, data=json.dumps({"model": image_model, "prompt": prompt.strip(), "n": 1, "response_format": "url"}).encode(), headers={"Authorization": f"Bearer {image_key}", "Content-Type": "application/json"}, method="POST")
+    if "openrouter.ai" in endpoint and not endpoint.rstrip("/").endswith("/images"):
+        raise HTTPException(status_code=503, detail="OpenRouter image generation endpoint must end in /api/v1/images")
+    body = {"model": image_model, "prompt": prompt.strip()}
+    req = URLRequest(endpoint, data=json.dumps(body).encode(), headers={"Authorization": f"Bearer {image_key}", "Content-Type": "application/json"}, method="POST")
     try:
-        with urlopen(req, timeout=90) as response:
-            data = json.loads(response.read(2_000_001).decode("utf-8"))
+        with urlopen(req, timeout=120) as response:
+            data = json.loads(response.read(12_000_001).decode("utf-8"))
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list) or not items or not isinstance(items[0], dict):
             raise ValueError("Image provider returned no image data")
@@ -1080,11 +1083,23 @@ def generate_image(payload: dict, current_user: dict = Depends(require_app_user)
         b64 = image.get("b64_json")
         if not url and not b64:
             raise ValueError("Image provider returned neither an image URL nor base64 image data")
-        return {"status": "ok", "model": image_model, "image": {"url": url, "b64_json": b64, "revised_prompt": image.get("revised_prompt")}}
+        usage = data.get("usage") if isinstance(data, dict) else None
+        return {
+            "status": "ok",
+            "model": image_model,
+            "usage": {"cost": usage.get("cost")} if isinstance(usage, dict) and usage.get("cost") is not None else {},
+            "image": {
+                "url": url,
+                "b64_json": b64,
+                "media_type": image.get("media_type") or "image/png",
+                "revised_prompt": image.get("revised_prompt"),
+            },
+        }
     except HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Image provider returned HTTP {exc.code}") from None
+        # Keep provider error bodies private; they may include request metadata.
+        raise HTTPException(status_code=502, detail=f"OpenRouter image request failed with HTTP {exc.code}") from None
     except (URLError, TimeoutError):
-        raise HTTPException(status_code=502, detail="Image provider is unreachable or timed out") from None
+        raise HTTPException(status_code=502, detail="OpenRouter image service is unreachable or timed out") from None
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=f"Image provider response invalid: {str(exc)[:180]}") from None
 
