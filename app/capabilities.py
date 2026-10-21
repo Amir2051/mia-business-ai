@@ -27,33 +27,58 @@ MAX_MEMORY = 2000
 MAX_TASKS_PER_USER = 50
 
 class _DDGParser(HTMLParser):
-    """Extract result links/snippets from DuckDuckGo's HTML endpoint."""
+    """Extract complete DuckDuckGo result records without dropping snippets."""
     def __init__(self):
-        super().__init__()
+        super().__init__(convert_charrefs=True)
         self.items = []
         self.current = None
         self.capture = None
         self.text = []
+
+    def _finish_result(self):
+        if self.current and self.current.get("title") and self.current.get("url"):
+            url = self.current["url"].strip()
+            # DuckDuckGo may wrap destinations in /l/?uddg=... redirects.
+            if url.startswith("/l/?"):
+                from urllib.parse import parse_qs, urlparse
+                url = parse_qs(urlparse(url).query).get("uddg", [""])[0]
+            if url.startswith("https://") and not any(item["url"] == url for item in self.items):
+                self.current["url"] = url[:2000]
+                self.current["title"] = self.current["title"][:500]
+                self.current["snippet"] = self.current.get("snippet", "")[:1200]
+                self.items.append(self.current)
+        self.current = None
+        self.capture = None
+        self.text = []
+
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        cls = attrs.get('class', '')
-        if tag == 'a' and 'result__a' in cls:
-            self.current = {'title': '', 'url': attrs.get('href', ''), 'snippet': ''}
-            self.capture = 'title'; self.text = []
-        elif self.current and tag in {'a', 'div'} and ('result__snippet' in cls):
-            self.capture = 'snippet'; self.text = []
+        classes = set(attrs.get("class", "").split())
+        if tag == "a" and "result__a" in classes:
+            self._finish_result()
+            self.current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
+            self.capture = "title"
+            self.text = []
+        elif self.current and "result__snippet" in classes and tag in {"a", "div"}:
+            self.capture = "snippet"
+            self.text = []
+
     def handle_data(self, data):
         if self.capture:
             self.text.append(data)
+
     def handle_endtag(self, tag):
-        if self.capture and ((self.capture == 'title' and tag == 'a') or (self.capture == 'snippet' and tag == 'div')):
-            value = ' '.join(' '.join(self.text).split())
-            self.current[self.capture] = value[:1200]
-            self.capture = None; self.text = []
-            if self.current and self.current.get('title'):
-                if self.capture is None and self.current.get('url') and self.current not in self.items:
-                    self.items.append(self.current)
-                    self.current = None
+        if not self.capture:
+            return
+        if (self.capture == "title" and tag == "a") or (self.capture == "snippet" and tag in {"a", "div"}):
+            value = " ".join(" ".join(self.text).split())
+            if self.current is not None:
+                self.current[self.capture] = value
+            self.capture = None
+            self.text = []
+
+    def finish(self):
+        self._finish_result()
 
 def web_research(query: str, limit: int = 5) -> dict:
     if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY:
@@ -82,7 +107,7 @@ def web_research(query: str, limit: int = 5) -> dict:
     try:
         with urlopen(req, timeout=12) as response: raw = response.read(750_001)
         if len(raw) > 750_000: raise ValueError('Search response exceeded the size limit')
-        parser = _DDGParser(); parser.feed(raw.decode('utf-8', 'replace'))
+        parser = _DDGParser(); parser.feed(raw.decode('utf-8', 'replace')); parser.finish()
         results = parser.items[:limit]
         if not results: raise RuntimeError('Unauthenticated web search returned no results. Configure BRAVE_SEARCH_API_KEY to enable reliable web research.')
         return {'query': query.strip(), 'results': results, 'count': len(results), 'source': 'DuckDuckGo HTML'}
@@ -228,9 +253,9 @@ def capabilities() -> dict:
     return {
         'chat': {'available': True},
         'github': {'available': True, 'read_only': True, 'owner_scope': 'Amir2051'},
-        'web_research': {'available': bool(os.getenv('BRAVE_SEARCH_API_KEY')), 'configuration_required': ['brave_search_api_key'] if not os.getenv('BRAVE_SEARCH_API_KEY') else [], 'max_results': MAX_RESULTS},
-        'image_generation': {'available': bool(os.getenv('IMAGE_GENERATION_ENDPOINT') and os.getenv('IMAGE_GENERATION_API_KEY') and os.getenv('IMAGE_GENERATION_MODEL')), 'configuration_required': ['image_endpoint','image_api_key','image_model']},
-        'persistent_memory': {'available': True, 'storage': 'postgres' if os.getenv('DATABASE_URL','').strip() else 'local_sqlite'},
+        'web_research': {'available': True, 'provider_configured': bool(os.getenv('BRAVE_SEARCH_API_KEY','').strip()), 'fallback': 'DuckDuckGo HTML (may be rate-limited)', 'configuration_required_for_reliable_search': ['brave_search_api_key'] if not os.getenv('BRAVE_SEARCH_API_KEY','').strip() else [], 'max_results': MAX_RESULTS},
+        'image_generation': {'available': bool(os.getenv('IMAGE_GENERATION_ENDPOINT','').strip() and os.getenv('IMAGE_GENERATION_API_KEY','').strip() and os.getenv('IMAGE_GENERATION_MODEL','').strip()), 'configuration_required': ['image_endpoint','image_api_key','image_model']},
+        'persistent_memory': {'available': True, 'storage': 'postgres' if os.getenv('DATABASE_URL','').strip() else 'local_sqlite', 'durable_across_host_restarts': bool(os.getenv('DATABASE_URL','').strip()), 'warning': None if os.getenv('DATABASE_URL','').strip() else 'Local SQLite may not survive ephemeral-host restarts or replacements'},
         'task_orchestration': {'available': True, 'max_steps': 20, 'execution': 'explicit step tracking; no arbitrary code execution'},
         'document_handling': {'available': True, 'formats': ['txt','md','source code','json','csv','docx','pdf'], 'max_upload_bytes': 3000000, 'max_extracted_characters': 40000},
         'coding_workflows': {'available': True, 'execution': 'analysis and repository reads only; no arbitrary shell execution'},
