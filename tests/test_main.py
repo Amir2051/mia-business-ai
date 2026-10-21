@@ -311,8 +311,8 @@ def test_github_file_tool_blocks_parent_traversal_and_returns_text(app, monkeypa
 def test_chat_github_request_executes_read_only_tool_call(app, monkeypatch):
     calls = []
 
-    def fake_openrouter(messages, model, temperature, max_tokens, tools=None):
-        calls.append((messages, tools))
+    def fake_openrouter(messages, model, temperature, max_tokens, tools=None, tool_choice="auto"):
+        calls.append((messages, tools, tool_choice))
         if len(calls) == 1:
             return {"choices": [{"finish_reason": "tool_calls", "message": {
                 "role": "assistant", "content": None, "tool_calls": [{
@@ -335,13 +335,15 @@ def test_chat_github_request_executes_read_only_tool_call(app, monkeypatch):
     assert response.reply == "I checked the Amir2051/rz-ai-agent repository."
     assert len(calls) == 2
     assert {tool["function"]["name"] for tool in calls[0][1]} == app.GITHUB_TOOL_NAMES
+    assert calls[0][2] == "required"
+    assert calls[1][2] == "auto"
     assert calls[1][0][-1]["tool_call_id"] == "call_repo"
 
 
 def test_github_tool_loop_rejects_unlisted_tool(app, monkeypatch):
     calls = 0
 
-    def fake_openrouter(messages, model, temperature, max_tokens, tools=None):
+    def fake_openrouter(messages, model, temperature, max_tokens, tools=None, tool_choice="auto"):
         nonlocal calls
         calls += 1
         if calls == 1:
