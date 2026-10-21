@@ -23,7 +23,9 @@ def test_tools_requires_auth_and_lists_real_capabilities(app):
     assert client.get('/v1/tools').status_code==401
     data=client.get('/v1/tools',headers={'X-API-Key':'test-key'}).json()
     assert data['capabilities']['github']['read_only'] is True
-    assert data['capabilities']['image_generation']['available'] is False
+    assert data['capabilities']['image_generation']['available'] is True
+    assert data['capabilities']['image_generation']['provider'] == 'openrouter'
+    assert data['capabilities']['image_generation']['model'] == 'bytedance-seed/seedream-4.5'
 
 def test_memory_is_persistent_and_user_scoped(app):
     client=TestClient(app.app); h={'X-API-Key':'test-key'}
