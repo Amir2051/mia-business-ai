@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request as URLRequest, urlopen
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -163,7 +163,7 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens) 
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     data = json.dumps(payload).encode("utf-8")
-    req = Request(
+    req = URLRequest(
         OPENROUTER_ENDPOINT,
         data=data,
         headers={
@@ -193,7 +193,7 @@ def _call_hermes(messages: list[dict], model: str, temperature, max_tokens) -> d
         headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
     else:
         headers["X-Api-Key"] = ""
-    req = Request(
+    req = URLRequest(
         f"{HERMES_BASE_URL}/chat/completions",
         data=data,
         headers=headers,
