@@ -1,11 +1,14 @@
+import base64
 import hmac
 import json
 import os
+import re
 import threading
 import time
 import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as URLRequest, urlopen
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -107,6 +110,103 @@ HERMES_BASE_URL = os.getenv(
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "").strip()
 HERMES_MODEL = os.getenv("HERMES_MODEL", "upstage/solar-mini4").strip()
 HERMES_ENABLED = bool(HERMES_API_KEY or os.getenv("HERMES_DEFAULT", "0").strip().lower() in {"1", "true", "yes"})
+
+# ---------------------------------------------------------------- GitHub read-only tools
+# Keep the integration scoped to the user's explicitly authorized GitHub owner.
+GITHUB_API_BASE = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_ALLOWED_OWNER = "Amir2051"
+
+
+def _github_request(path: str) -> object:
+    """Call the GitHub REST API with read-only GET requests and bounded responses."""
+    if not path.startswith("/repos/Amir2051/"):
+        raise ValueError("GitHub access is restricted to repositories owned by Amir2051")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "RZ-Agent-GitHub-MCP",
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    request = URLRequest(f"{GITHUB_API_BASE}{path}", headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=12) as response:
+            raw = response.read(1_000_001)
+            if len(raw) > 1_000_000:
+                raise ValueError("GitHub response exceeded the 1 MB safety limit")
+            return json.loads(raw.decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError("GitHub repository or resource was not found, or is not accessible") from None
+        if exc.code == 401:
+            raise ValueError("GitHub authentication failed; check GITHUB_TOKEN in the service environment") from None
+        if exc.code == 403:
+            raise ValueError("GitHub denied the request; check token permissions or API rate limits") from None
+        raise ValueError(f"GitHub API request failed with HTTP {exc.code}") from None
+    except URLError:
+        raise ValueError("Could not connect to the GitHub API") from None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("GitHub returned an invalid JSON response") from None
+
+
+def _github_repo_name(arguments: dict) -> str:
+    repo = arguments.get("repo")
+    if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", repo) or repo in {".", ".."}:
+        raise ValueError("repo must be a repository name under Amir2051")
+    return repo
+
+
+def _github_tool_call(name: str, arguments: dict) -> dict:
+    """Dispatch only allowlisted read-only GitHub MCP tools."""
+    repo = _github_repo_name(arguments)
+    base = f"/repos/{GITHUB_ALLOWED_OWNER}/{quote(repo, safe='') }"
+    if name == "github_get_repository":
+        data = _github_request(base)
+        return {key: data.get(key) for key in (
+            "full_name", "description", "private", "html_url", "default_branch",
+            "archived", "fork", "open_issues_count", "stargazers_count", "updated_at"
+        )}
+    if name in {"github_list_issues", "github_list_pull_requests"}:
+        limit = arguments.get("limit", 10)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+            raise ValueError("limit must be an integer from 1 to 20")
+        state = arguments.get("state", "open")
+        if state not in {"open", "closed", "all"}:
+            raise ValueError("state must be open, closed, or all")
+        if name == "github_list_pull_requests":
+            path = f"{base}/pulls?state={quote(state)}&per_page={limit}&sort=updated&direction=desc"
+        else:
+            path = f"{base}/issues?state={quote(state)}&per_page={limit}&sort=updated&direction=desc"
+        data = _github_request(path)
+        if name == "github_list_issues":
+            data = [item for item in data if "pull_request" not in item]
+        return [{key: item.get(key) for key in (
+            "number", "title", "state", "html_url", "created_at", "updated_at", "user", "labels"
+        )} for item in data]
+    if name == "github_get_file_contents":
+        file_path = arguments.get("path")
+        if not isinstance(file_path, str) or not file_path or len(file_path) > 500 or file_path.startswith("/") or ".." in file_path.split("/"):
+            raise ValueError("path must be a repository-relative file path without parent traversal")
+        ref = arguments.get("ref")
+        if ref is not None and (not isinstance(ref, str) or not ref or len(ref) > 200):
+            raise ValueError("ref must be a non-empty branch, tag, or commit string")
+        endpoint = f"{base}/contents/{quote(file_path, safe='/')}"
+        if ref:
+            endpoint += f"?ref={quote(ref, safe='')}"
+        data = _github_request(endpoint)
+        if not isinstance(data, dict) or data.get("type") != "file":
+            raise ValueError("The requested path is not a single file")
+        content = data.get("content", "")
+        if data.get("encoding") == "base64":
+            try:
+                content = base64.b64decode(content).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError("File content is not valid UTF-8 text") from None
+        if not isinstance(content, str):
+            raise ValueError("GitHub did not return text file content")
+        return {"path": data.get("path"), "size": data.get("size"), "html_url": data.get("html_url"), "content": content[:30000], "truncated": len(content) > 30000}
+    raise ValueError(f"Unknown GitHub tool: {name}")
 
 # ---------------------------------------------------------------- session store
 HISTORY_LIMIT = int(os.getenv("SESSION_HISTORY_LIMIT", "12"))
@@ -530,6 +630,26 @@ MCP_TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "github_get_repository",
+        "description": "Read repository metadata from the GitHub account Amir2051. Read-only; private repositories require GITHUB_TOKEN to be configured on the server.",
+        "inputSchema": {"type": "object", "properties": {"repo": {"type": "string", "minLength": 1, "maxLength": 100}}, "required": ["repo"], "additionalProperties": False},
+    },
+    {
+        "name": "github_list_issues",
+        "description": "List GitHub issues (excluding pull requests) for a repository owned by Amir2051. Read-only; limit is 1–20.",
+        "inputSchema": {"type": "object", "properties": {"repo": {"type": "string", "minLength": 1, "maxLength": 100}, "state": {"type": "string", "enum": ["open", "closed", "all"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["repo"], "additionalProperties": False},
+    },
+    {
+        "name": "github_list_pull_requests",
+        "description": "List GitHub pull requests for a repository owned by Amir2051. Read-only; limit is 1–20.",
+        "inputSchema": {"type": "object", "properties": {"repo": {"type": "string", "minLength": 1, "maxLength": 100}, "state": {"type": "string", "enum": ["open", "closed", "all"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["repo"], "additionalProperties": False},
+    },
+    {
+        "name": "github_get_file_contents",
+        "description": "Read a UTF-8 text file from a repository owned by Amir2051. Read-only; private repositories require GITHUB_TOKEN. Content is capped at 30,000 characters.",
+        "inputSchema": {"type": "object", "properties": {"repo": {"type": "string", "minLength": 1, "maxLength": 100}, "path": {"type": "string", "minLength": 1, "maxLength": 500}, "ref": {"type": "string", "maxLength": 200}}, "required": ["repo", "path"], "additionalProperties": False},
+    },
 ]
 
 
@@ -565,7 +685,7 @@ async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_app_u
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": MCP_SERVER_INFO,
-            "instructions": "RZ Agent tools use the authenticated user's existing RZ Agent backend. Runtime status omits secrets. Chat follows the configured provider privacy settings.",
+            "instructions": "RZ Agent tools use the authenticated user's existing RZ Agent backend. Runtime status omits secrets. Chat follows the configured provider privacy settings. GitHub tools are read-only and restricted to repositories owned by Amir2051; private repositories require a server-side GITHUB_TOKEN.",
         }
     elif method == "ping":
         result = {}
@@ -599,6 +719,8 @@ async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_app_u
                     max_tokens=1200,
                 )
                 value = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+            elif name in {"github_get_repository", "github_list_issues", "github_list_pull_requests", "github_get_file_contents"}:
+                value = _github_tool_call(name, arguments)
             elif name == "reset_conversation":
                 session_id = arguments.get("session_id")
                 if not isinstance(session_id, str) or not session_id.startswith(f"{current_user['id']}:"):
@@ -660,4 +782,5 @@ def capabilities(_current_user: dict = Depends(require_app_user)):
         },
         "session_history_limit": HISTORY_LIMIT,
         "session_ttl_seconds": SESSION_TTL_SECONDS,
+        "integrations": {"github": {"configured": bool(GITHUB_TOKEN), "allowed_owner": GITHUB_ALLOWED_OWNER, "read_only": True}},
     }
