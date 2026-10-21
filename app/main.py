@@ -293,11 +293,21 @@ def _complete_message(
         providers.append(("hermes", _call_hermes))
 
     result = None
+    provider_model_used = None
     last_error: Exception | None = None
     for name, fn in providers:
+        provider_model = (
+            (model or OPENROUTER_MODEL) if name == "openrouter" else HERMES_MODEL
+        )
         try:
-            result = fn(_base_messages(system, user_content, session_id), model, temperature, max_tokens)
+            result = fn(
+                _base_messages(system, user_content, session_id),
+                provider_model,
+                temperature,
+                max_tokens,
+            )
             provider = name
+            provider_model_used = provider_model
             break
         except HTTPException:
             raise
@@ -383,13 +393,13 @@ def _complete_message(
     history = _get_session(session_id)["history"]
     history.append({"role": "user", "content": user_content})
     history.append({"role": "assistant", "content": reply})
-    _touch_session(session_id, model or OPENROUTER_MODEL)
+    _touch_session(session_id, provider_model_used or model or OPENROUTER_MODEL)
     history = _get_session(session_id)["history"]
 
     return ChatResponse(
         status="ok",
         session_id=session_id,
-        model=model or OPENROUTER_MODEL,
+        model=provider_model_used or model or OPENROUTER_MODEL,
         provider=provider,
         reply=reply,
         history_length=len(history),
