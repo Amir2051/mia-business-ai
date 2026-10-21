@@ -87,12 +87,13 @@ def test_hermes_default_provider_fallback(app, monkeypatch):
         raise RuntimeError("openrouter should not be called")
 
     def fake_hermes(messages, model, temperature, max_tokens):
+        assert model == app.HERMES_MODEL
         return {"choices": [{"message": {"content": "hermes reply"}}]}
 
     with mock.patch.object(app, "_call_openrouter", fake_openrouter), \
          mock.patch.object(app, "_call_hermes", fake_hermes):
         resp = app._complete_message(
-            "s", "from hermes", "sess2", None, None, None
+            "s", "from hermes", "sess2", "example/openrouter-model", None, None
         )
 
     assert resp.reply == "hermes reply"
