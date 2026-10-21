@@ -186,3 +186,77 @@ def test_capabilities_endpoint_does_not_expose_secrets(app):
     assert result["privacy"]["zdr_requested"] is True
     assert "API_KEY" not in str(result)
     assert "secret" not in str(result)
+
+
+def test_mcp_initialize_and_tool_discovery_are_authenticated(app):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    denied = client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
+    assert denied.status_code == 401
+    initialized = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+        'params': {'protocolVersion': '2025-03-26', 'capabilities': {}, 'clientInfo': {'name': 'test', 'version': '1'}},
+    })
+    assert initialized.status_code == 200
+    assert initialized.json()['result']['capabilities']['tools']['listChanged'] is False
+    listed = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {},
+    }).json()
+    names = {tool['name'] for tool in listed['result']['tools']}
+    assert names == {'get_runtime_status', 'list_conversations', 'chat', 'reset_conversation'}
+
+
+def test_mcp_status_does_not_disclose_credentials(app):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    result = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call',
+        'params': {'name': 'get_runtime_status', 'arguments': {}},
+    }).json()['result']['structuredContent']
+    assert result['status'] == 'ok'
+    assert 'OPENROUTER_API_KEY' not in str(result)
+    assert 'hermes-secret' not in str(result)
+    assert 'test-key' not in str(result)
+
+
+def test_mcp_chat_uses_existing_provider_and_enforces_session_ownership(app, monkeypatch):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    monkeypatch.setattr(app, '_call_openrouter', lambda *args: {
+        'choices': [{'message': {'content': 'MCP hello'}}]
+    })
+    denied = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 4, 'method': 'tools/call',
+        'params': {'name': 'chat', 'arguments': {'message': 'hello', 'session_id': 'another-user:secret'}},
+    }).json()['result']
+    assert denied['isError'] is True
+    assert 'does not belong' in denied['structuredContent']['error']
+    response = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 5, 'method': 'tools/call',
+        'params': {'name': 'chat', 'arguments': {'message': 'hello'}},
+    }).json()['result']['structuredContent']
+    assert response['reply'] == 'MCP hello'
+    assert response['session_id'].startswith('local:')
+
+
+def test_mcp_reset_only_deletes_owned_conversation(app):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    with app._store_lock:
+        app._conversations['local:mine'] = {'history': [], 'updated': 9999999999, 'model': 'test'}
+        app._conversations['other:theirs'] = {'history': [], 'updated': 9999999999, 'model': 'test'}
+    denied = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 6, 'method': 'tools/call',
+        'params': {'name': 'reset_conversation', 'arguments': {'session_id': 'other:theirs'}},
+    }).json()['result']
+    assert denied['isError'] is True
+    with app._store_lock:
+        assert 'other:theirs' in app._conversations
+    success = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call',
+        'params': {'name': 'reset_conversation', 'arguments': {'session_id': 'local:mine'}},
+    }).json()['result']['structuredContent']
+    assert success['reset'] is True
+    with app._store_lock:
+        assert 'local:mine' not in app._conversations
+        app._conversations.pop('other:theirs', None)

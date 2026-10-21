@@ -9,7 +9,7 @@ from urllib.request import Request as URLRequest, urlopen
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pathlib import Path
 from pydantic import BaseModel, Field
 
@@ -490,6 +490,149 @@ def list_conversations(current_user: dict = Depends(require_app_user)):
         _prune_expired_sessions_locked()
         ids = sorted(k for k in _conversations.keys() if k.startswith(prefix))
     return {"status": "ok", "count": len(ids), "sessions": ids}
+
+
+# ---------------------------------------------------------------- Model Context Protocol (MCP)
+MCP_PROTOCOL_VERSION = "2025-03-26"
+MCP_SERVER_INFO = {"name": "rz-agent", "version": "0.1.0"}
+
+MCP_TOOLS = [
+    {
+        "name": "get_runtime_status",
+        "description": "Get safe RZ Agent runtime, model-routing, privacy-flag, and session-limit status. Never returns credentials or conversation text.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "list_conversations",
+        "description": "List the authenticated user's active in-memory conversation IDs. Does not return message contents.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "chat",
+        "description": "Send a message to RZ Agent's configured AI model. Optionally continue one of your own conversation IDs. Provider ZDR and no-fallback settings remain enforced by the existing backend.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "session_id": {"type": "string", "description": "Optional conversation ID previously returned for your account."},
+            },
+            "required": ["message"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reset_conversation",
+        "description": "Delete an active in-memory conversation belonging to the authenticated user. This action cannot be undone.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string", "minLength": 1}},
+            "required": ["session_id"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+
+def _mcp_text_result(value: dict, is_error: bool = False) -> dict:
+    return {
+        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
+        "structuredContent": value,
+        "isError": is_error,
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_app_user)):
+    """Minimal authenticated MCP JSON-RPC endpoint for Streamable HTTP clients."""
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        return JSONResponse(status_code=400, content={
+            "jsonrpc": "2.0", "id": payload.get("id") if isinstance(payload, dict) else None,
+            "error": {"code": -32600, "message": "Invalid JSON-RPC request"},
+        })
+
+    method = payload.get("method")
+    request_id = payload.get("id")
+    params = payload.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+
+    # MCP notifications intentionally have no response body.
+    if method == "notifications/initialized" and request_id is None:
+        return Response(status_code=202)
+
+    if method == "initialize":
+        result = {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": MCP_SERVER_INFO,
+            "instructions": "RZ Agent tools use the authenticated user's existing RZ Agent backend. Runtime status omits secrets. Chat follows the configured provider privacy settings.",
+        }
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": MCP_TOOLS}
+    elif method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        try:
+            if name == "get_runtime_status":
+                value = capabilities(current_user)
+            elif name == "list_conversations":
+                value = list_conversations(current_user)
+            elif name == "chat":
+                message = arguments.get("message")
+                if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+                    raise ValueError("message must contain 1–4000 characters")
+                prefix = f"{current_user['id']}:"
+                supplied_id = arguments.get("session_id")
+                if supplied_id and (not isinstance(supplied_id, str) or not supplied_id.startswith(prefix)):
+                    raise ValueError("Conversation does not belong to this account")
+                session_id = supplied_id or prefix + uuid.uuid4().hex[:12]
+                response = _complete_message(
+                    system="You are RZ Agent, a concise, helpful personal AI assistant.",
+                    user_content=message,
+                    session_id=session_id,
+                    model=_select_model_for_task(message),
+                    temperature=None,
+                    max_tokens=1200,
+                )
+                value = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+            elif name == "reset_conversation":
+                session_id = arguments.get("session_id")
+                if not isinstance(session_id, str) or not session_id.startswith(f"{current_user['id']}:"):
+                    raise ValueError("Conversation does not belong to this account")
+                with _store_lock:
+                    existed = _conversations.pop(session_id, None) is not None
+                if not existed:
+                    raise ValueError("Conversation not found or already expired")
+                value = {"status": "ok", "session_id": session_id, "reset": True}
+            else:
+                return JSONResponse(status_code=200, content={
+                    "jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32602, "message": f"Unknown tool: {name}"},
+                })
+            result = _mcp_text_result(value)
+        except (ValueError, TypeError) as exc:
+            result = _mcp_text_result({"error": str(exc)}, is_error=True)
+        except HTTPException as exc:
+            result = _mcp_text_result({"error": exc.detail}, is_error=True)
+    elif method == "resources/list":
+        result = {"resources": []}
+    elif method == "prompts/list":
+        result = {"prompts": []}
+    elif method == "notifications/cancelled" and request_id is None:
+        return Response(status_code=202)
+    else:
+        return JSONResponse(status_code=200, content={
+            "jsonrpc": "2.0", "id": request_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        })
+
+    if request_id is None:
+        return Response(status_code=202)
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
 @app.get("/v1/capabilities")
