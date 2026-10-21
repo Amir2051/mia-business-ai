@@ -303,7 +303,7 @@ def _base_messages(system: str, user_content: str, session_id: str) -> list[dict
     return messages
 
 
-def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, tools: list[dict] | None = None) -> dict:
+def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, tools: list[dict] | None = None, tool_choice: str = "auto") -> dict:
     payload: dict = {
         "model": model or OPENROUTER_MODEL,
         "messages": messages,
@@ -315,7 +315,7 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, 
         payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice
     data = json.dumps(payload).encode("utf-8")
     req = URLRequest(
         _openrouter_chat_completions_url(OPENROUTER_ENDPOINT),
@@ -431,8 +431,14 @@ def _complete_with_github_tools(system, user_content, session_id, model, tempera
     })
     tools = _github_tools_for_openrouter()
     provider_model = model or OPENROUTER_MODEL
-    for _ in range(MAX_GITHUB_TOOL_ROUNDS + 1):
-        result = _call_openrouter(messages, provider_model, temperature, max_tokens, tools=tools)
+    for round_index in range(MAX_GITHUB_TOOL_ROUNDS + 1):
+        # Force a real tool invocation on the initial GitHub request so the model
+        # cannot answer with a generic claim that it lacks repository access.
+        # Subsequent turns use auto so the model can synthesize tool results.
+        result = _call_openrouter(
+            messages, provider_model, temperature, max_tokens, tools=tools,
+            tool_choice="required" if round_index == 0 else "auto",
+        )
         choices = result.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices else {}
         assistant = choice.get("message") if isinstance(choice, dict) else None
