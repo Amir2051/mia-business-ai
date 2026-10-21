@@ -126,8 +126,22 @@ def _is_placeholder(token: str) -> bool:
 
 # ---------------------------------------------------------------- session store
 
+def _prune_expired_sessions_locked(now: float | None = None) -> int:
+    """Remove idle in-memory sessions; caller must hold _store_lock."""
+    current = time.time() if now is None else now
+    expired = [
+        session_id
+        for session_id, conv in _conversations.items()
+        if current - conv.get("updated", current) > SESSION_TTL_SECONDS
+    ]
+    for session_id in expired:
+        _conversations.pop(session_id, None)
+    return len(expired)
+
+
 def _get_session(session_id: str) -> dict:
     with _store_lock:
+        _prune_expired_sessions_locked()
         conv = _conversations.get(session_id)
         if conv is None:
             conv = {"history": [], "updated": time.time(), "model": OPENROUTER_MODEL}
@@ -473,5 +487,34 @@ def reset_conversation(session_id: str, current_user: dict = Depends(require_app
 def list_conversations(current_user: dict = Depends(require_app_user)):
     prefix = f"{current_user['id']}:"
     with _store_lock:
+        _prune_expired_sessions_locked()
         ids = sorted(k for k in _conversations.keys() if k.startswith(prefix))
     return {"status": "ok", "count": len(ids), "sessions": ids}
+
+
+@app.get("/v1/capabilities")
+def capabilities(_current_user: dict = Depends(require_app_user)):
+    """Expose safe runtime capabilities without returning credentials or prompts."""
+    openrouter_configured = bool(
+        OPENROUTER_API_KEY and not _is_placeholder(OPENROUTER_API_KEY)
+    )
+    return {
+        "status": "ok",
+        "provider": "openrouter" if openrouter_configured else (
+            "hermes" if HERMES_ENABLED else "none"
+        ),
+        "default_model": OPENROUTER_MODEL if openrouter_configured else (
+            HERMES_MODEL if HERMES_ENABLED else None
+        ),
+        "task_routing": {
+            "coding_model_configured": bool(OPENROUTER_CODING_MODEL),
+            "analysis_model_configured": bool(OPENROUTER_ANALYSIS_MODEL),
+        },
+        "privacy": {
+            "zdr_requested": openrouter_configured,
+            "provider_fallbacks_disabled": openrouter_configured,
+            "unverified_provider_fallback_disabled": openrouter_configured,
+        },
+        "session_history_limit": HISTORY_LIMIT,
+        "session_ttl_seconds": SESSION_TTL_SECONDS,
+    }

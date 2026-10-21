@@ -154,3 +154,35 @@ def test_task_model_routing_preserves_default_and_explicit_override(app, monkeyp
     monkeypatch.setattr(app, "OPENROUTER_CODING_MODEL", "example/coding-model")
     assert app._select_model_for_task("Tell me a joke") == "example/default-model"
     assert app._select_model_for_task("Debug this code", "example/manual-model") == "example/manual-model"
+
+
+def test_idle_sessions_expire_on_access(app, monkeypatch):
+    monkeypatch.setattr(app, "SESSION_TTL_SECONDS", 60)
+    with app._store_lock:
+        app._conversations["expired"] = {
+            "history": [{"role": "user", "content": "old"}],
+            "updated": 100.0,
+            "model": "example/model",
+        }
+        app._conversations["fresh"] = {
+            "history": [],
+            "updated": 950.0,
+            "model": "example/model",
+        }
+        removed = app._prune_expired_sessions_locked(now=1000.0)
+        assert removed == 1
+        assert "expired" not in app._conversations
+        assert "fresh" in app._conversations
+
+
+def test_capabilities_endpoint_does_not_expose_secrets(app):
+    app.OPENROUTER_CODING_MODEL = "example/coder"
+    app.OPENROUTER_ANALYSIS_MODEL = ""
+    result = app.capabilities({"id": "user-1"})
+    assert result["provider"] == "openrouter"
+    assert result["default_model"] == app.OPENROUTER_MODEL
+    assert result["task_routing"]["coding_model_configured"] is True
+    assert result["task_routing"]["analysis_model_configured"] is False
+    assert result["privacy"]["zdr_requested"] is True
+    assert "API_KEY" not in str(result)
+    assert "secret" not in str(result)
