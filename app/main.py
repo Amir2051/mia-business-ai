@@ -57,6 +57,30 @@ def auth_mode():
 # ---------------------------------------------------------------- OpenRouter (primary)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-20b").strip()
+OPENROUTER_CODING_MODEL = os.getenv("OPENROUTER_CODING_MODEL", "").strip()
+OPENROUTER_ANALYSIS_MODEL = os.getenv("OPENROUTER_ANALYSIS_MODEL", "").strip()
+
+
+def _select_model_for_task(message: str, requested_model: str | None = None) -> str:
+    """Choose an optional task-specific model; never override an explicit user choice."""
+    if requested_model and requested_model.strip():
+        return requested_model.strip()
+
+    text = message.lower()
+    coding_terms = (
+        "debug", "debugging", "stack trace", "traceback", "write code",
+        "fix this code", "programming", "python", "javascript", "typescript",
+        "sql query", "unit test", "refactor", "compile error", "deployment error",
+    )
+    analysis_terms = (
+        "analyze", "analysis", "compare", "evaluate", "investigate",
+        "research", "pros and cons", "strategy", "root cause", "plan architecture",
+    )
+    if OPENROUTER_CODING_MODEL and any(term in text for term in coding_terms):
+        return OPENROUTER_CODING_MODEL
+    if OPENROUTER_ANALYSIS_MODEL and any(term in text for term in analysis_terms):
+        return OPENROUTER_ANALYSIS_MODEL
+    return OPENROUTER_MODEL
 OPENROUTER_ENDPOINT = os.getenv(
     "OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"
 ).strip()
@@ -409,11 +433,12 @@ def chat(request: ChatRequest, current_user: dict = Depends(require_app_user)):
         raise HTTPException(status_code=403, detail="Conversation does not belong to this account")
     else:
         session_id = prefix + (request.session_id or uuid.uuid4().hex[:12])
+    selected_model = _select_model_for_task(request.message, request.model)
     return _complete_message(
         system=request.system,
         user_content=request.message,
         session_id=session_id,
-        model=request.model,
+        model=selected_model,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
     )
