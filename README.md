@@ -87,3 +87,20 @@ curl -sS http://127.0.0.1:8788/mcp \
   -H 'X-API-Key: YOUR_RZ_API_KEY' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mcp-client","version":"1.0"}}}'
 ```
+
+## Read-only GitHub MCP tools
+
+The authenticated `/mcp` endpoint also exposes four GitHub read-only tools, restricted to repositories owned by `Amir2051`:
+
+- `github_get_repository` — repository metadata.
+- `github_list_issues` — issue summaries, excluding pull requests.
+- `github_list_pull_requests` — pull-request summaries.
+- `github_get_file_contents` — UTF-8 text file content (maximum 30,000 characters).
+
+Public repositories can be read without a GitHub token. To read private repositories, configure `GITHUB_TOKEN` as a server-side environment secret with read-only repository/content permissions. Never pass the token in MCP arguments or commit it. The integration does not expose GitHub write operations, arbitrary owners, or shell access. Issue/PR list calls are limited to 20 results per request.
+
+Example MCP tool call after authentication:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"github_get_repository","arguments":{"repo":"rz-ai-agent"}}}
+```
