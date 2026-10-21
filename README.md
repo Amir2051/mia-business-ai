@@ -47,3 +47,14 @@ When an OpenRouter key is configured, the app will not fall back to Hermes after
 an OpenRouter error, because Hermes' endpoint has not been verified for this
 ZDR requirement. It returns a clear failure instead. Hermes can be used as the
 primary provider only when OpenRouter is not configured.
+
+
+## Runtime capabilities and session cleanup
+
+Authenticated clients can query `GET /v1/capabilities` to inspect the active provider,
+default model, whether optional task-specific routes are configured, privacy request
+flags, and session limits. This endpoint never returns API keys, prompts, or chat content.
+
+Idle in-memory conversations are removed after `SESSION_TTL_SECONDS` (default: one hour)
+when sessions are accessed or listed. This is memory cleanup, not durable storage:
+conversation history still does not survive a process restart.
