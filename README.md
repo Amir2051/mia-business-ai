@@ -58,3 +58,32 @@ flags, and session limits. This endpoint never returns API keys, prompts, or cha
 Idle in-memory conversations are removed after `SESSION_TTL_SECONDS` (default: one hour)
 when sessions are accessed or listed. This is memory cleanup, not durable storage:
 conversation history still does not survive a process restart.
+
+
+## Model Context Protocol (MCP) tools
+
+RZ Agent exposes an authenticated MCP JSON-RPC endpoint at `POST /mcp` using the
+Streamable HTTP request shape. It reuses the existing RZ Agent authentication: send
+`X-API-Key: <RZ_API_KEY>` in local API-key mode, or use the signed-in account session
+when running in account-auth mode. Do not put API keys in tool arguments or commit them
+to client configuration files.
+
+Available tools:
+
+- `get_runtime_status`: safe provider/model routing and privacy-flag summary; no secrets or chat content.
+- `list_conversations`: active conversation IDs for the authenticated user only.
+- `chat`: send a prompt through the existing configured model and provider policy.
+- `reset_conversation`: delete one of the authenticated user's active in-memory conversations.
+
+MCP does not add web search, filesystem access, shell execution, or external app integrations.
+Those should be added individually with explicit permission boundaries. The existing OpenRouter
+Zero Data Retention request and disabled provider fallbacks remain unchanged.
+
+MCP initialize example (replace the key locally; never paste a real key into shared logs):
+
+```bash
+curl -sS http://127.0.0.1:8788/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: YOUR_RZ_API_KEY' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mcp-client","version":"1.0"}}}'
+```
