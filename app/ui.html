@@ -67,13 +67,27 @@ input,textarea,select{background:#07111d;border-color:#234257;border-radius:11px
   if(name==='memory-list'){
    const data=await request('/v1/memory?limit=20');
    if(!data.memories.length){addBubble('No saved memories found for this account.','assistant');return}
-   addBubble('Saved memories:\n'+data.memories.map((m,i)=>(i+1)+'. '+m.content+' [ID: '+m.id+']').join('\n')+'\n\nTo delete one, copy its ID and use the API DELETE /v1/memory/{id}.','assistant');setStatus('Memories loaded');return;
+   addBubble('Saved memories:\\n'+data.memories.map((m,i)=>(i+1)+'. '+m.content).join('\\n'),'assistant');setStatus('Memories loaded');
+   const choice=window.prompt('Enter the number of a memory to delete, or leave blank to keep all memories:');
+   if(choice&&/^\\d+$/.test(choice)){const item=data.memories[Number(choice)-1];if(!item){addBubble('That memory number is not in the list.','error');return}
+    if(window.confirm('Delete this saved memory?\\n'+item.content)){await request('/v1/memory/'+encodeURIComponent(item.id),{method:'DELETE'});addBubble('Memory deleted.','assistant');setStatus('Memory deleted')}
+   }return;
   }
   if(name==='tasks'){
    const choice=window.prompt('Task tracker: type "create" to add a plan, or "list" to view existing tasks.','create');if(!choice)return;
    if(choice.trim().toLowerCase()==='list'){
     const data=await request('/v1/tasks?limit=20');
-    addBubble(data.tasks.length?'Tasks:\n'+data.tasks.map(t=>t.title+' — '+t.status+'\n'+t.steps.map((s,i)=>(i+1)+'. ['+s.status+'] '+s.title).join('\n')).join('\n\n'):'No tasks saved yet.','assistant');setStatus('Tasks loaded');return;
+    if(!data.tasks.length){addBubble('No tasks saved yet.','assistant');return}
+    addBubble('Tasks:\\n'+data.tasks.map((t,i)=>(i+1)+'. '+t.title+' — '+t.status+'\\n'+t.steps.map((s,j)=>(j+1)+'. ['+s.status+'] '+s.title).join('\\n')).join('\\n\\n'),'assistant');setStatus('Tasks loaded');
+    const taskChoice=window.prompt('Enter a task number to update a step, or leave blank to finish:');
+    if(taskChoice&&/^\\d+$/.test(taskChoice)){const task=data.tasks[Number(taskChoice)-1];if(!task){addBubble('That task number is not in the list.','error');return}
+     const stepChoice=window.prompt('Enter a step number for "'+task.title+'":');
+     if(stepChoice&&/^\\d+$/.test(stepChoice)){const step=task.steps[Number(stepChoice)-1];if(!step){addBubble('That step number is not in the task.','error');return}
+      const status=window.prompt('New status: pending, in_progress, completed, or blocked',step.status);
+      if(status){const updated=await request('/v1/tasks/'+encodeURIComponent(task.id)+'/steps/'+(Number(stepChoice)-1),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:status.trim()})});addBubble('Updated task: '+updated.task.title+'\\nStatus: '+updated.task.status,'assistant');setStatus('Task step updated')}
+     }
+    }return;
+   }
    }
    if(choice.trim().toLowerCase()!=='create'){addBubble('Choose "create" or "list" to use the task tracker.','error');return}
    const title=window.prompt('Task title:');if(!title||!title.trim())return;
