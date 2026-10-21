@@ -203,7 +203,7 @@ def test_mcp_initialize_and_tool_discovery_are_authenticated(app):
         'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {},
     }).json()
     names = {tool['name'] for tool in listed['result']['tools']}
-    assert names == {'get_runtime_status', 'list_conversations', 'chat', 'reset_conversation'}
+    assert names == {'get_runtime_status', 'list_conversations', 'chat', 'reset_conversation', 'github_get_repository', 'github_list_issues', 'github_list_pull_requests', 'github_get_file_contents'}
 
 
 def test_mcp_status_does_not_disclose_credentials(app):
@@ -260,3 +260,49 @@ def test_mcp_reset_only_deletes_owned_conversation(app):
     with app._store_lock:
         assert 'local:mine' not in app._conversations
         app._conversations.pop('other:theirs', None)
+
+
+def test_github_repository_tool_is_read_only_and_scoped_to_amir2051(app, monkeypatch):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    calls = []
+    monkeypatch.setattr(app, "_github_request", lambda path: calls.append(path) or {
+        "full_name": "Amir2051/rz-ai-agent", "private": True, "html_url": "https://github.com/Amir2051/rz-ai-agent",
+        "default_branch": "master", "description": "RZ Agent", "updated_at": "2026-10-21T00:00:00Z"
+    })
+    response = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 20, 'method': 'tools/call',
+        'params': {'name': 'github_get_repository', 'arguments': {'repo': 'rz-ai-agent'}},
+    }).json()['result']['structuredContent']
+    assert response['full_name'] == 'Amir2051/rz-ai-agent'
+    assert calls == ['/repos/Amir2051/rz-ai-agent']
+    denied = client.post('/mcp', headers={'X-API-Key': 'test-key'}, json={
+        'jsonrpc': '2.0', 'id': 21, 'method': 'tools/call',
+        'params': {'name': 'github_get_repository', 'arguments': {'repo': '../other-owner/private'}},
+    }).json()['result']
+    assert denied['isError'] is True
+    assert not any('other-owner' in call for call in calls)
+
+
+def test_github_issue_listing_filters_pull_requests_and_bounds_limit(app, monkeypatch):
+    data = [
+        {'number': 1, 'title': 'Issue', 'state': 'open', 'html_url': 'https://github.com/Amir2051/rz-ai-agent/issues/1'},
+        {'number': 2, 'title': 'PR masquerading in issues API', 'state': 'open', 'pull_request': {'url': 'x'}},
+    ]
+    monkeypatch.setattr(app, '_github_request', lambda path: data)
+    result = app._github_tool_call('github_list_issues', {'repo': 'rz-ai-agent', 'limit': 2})
+    assert [item['number'] for item in result] == [1]
+    with pytest.raises(ValueError, match='limit'):
+        app._github_tool_call('github_list_issues', {'repo': 'rz-ai-agent', 'limit': 100})
+
+
+def test_github_file_tool_blocks_parent_traversal_and_returns_text(app, monkeypatch):
+    import base64
+    monkeypatch.setattr(app, '_github_request', lambda path: {
+        'type': 'file', 'path': 'README.md', 'size': 5, 'html_url': 'https://github.com/Amir2051/rz-ai-agent/blob/master/README.md',
+        'encoding': 'base64', 'content': base64.b64encode(b'hello').decode()
+    })
+    result = app._github_tool_call('github_get_file_contents', {'repo': 'rz-ai-agent', 'path': 'README.md'})
+    assert result['content'] == 'hello'
+    with pytest.raises(ValueError, match='path'):
+        app._github_tool_call('github_get_file_contents', {'repo': 'rz-ai-agent', 'path': '../.env'})
