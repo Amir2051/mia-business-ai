@@ -306,3 +306,55 @@ def test_github_file_tool_blocks_parent_traversal_and_returns_text(app, monkeypa
     assert result['content'] == 'hello'
     with pytest.raises(ValueError, match='path'):
         app._github_tool_call('github_get_file_contents', {'repo': 'rz-ai-agent', 'path': '../.env'})
+
+
+def test_chat_github_request_executes_read_only_tool_call(app, monkeypatch):
+    calls = []
+
+    def fake_openrouter(messages, model, temperature, max_tokens, tools=None):
+        calls.append((messages, tools))
+        if len(calls) == 1:
+            return {"choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": "call_repo", "type": "function", "function": {
+                        "name": "github_get_repository", "arguments": '{"repo":"rz-ai-agent"}'
+                    }
+                }]
+            }}]}
+        assert messages[-1]["role"] == "tool"
+        assert '"full_name": "Amir2051/rz-ai-agent"' in messages[-1]["content"]
+        return {"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": "I checked the Amir2051/rz-ai-agent repository."
+        }}]}
+
+    monkeypatch.setattr(app, "_call_openrouter", fake_openrouter)
+    monkeypatch.setattr(app, "_github_tool_call", lambda name, args: {
+        "full_name": f"Amir2051/{args['repo']}", "private": False
+    })
+    response = app._complete_message("You are helpful", "Check my GitHub repository rz-ai-agent", "local:tools", None, None, None)
+    assert response.reply == "I checked the Amir2051/rz-ai-agent repository."
+    assert len(calls) == 2
+    assert {tool["function"]["name"] for tool in calls[0][1]} == app.GITHUB_TOOL_NAMES
+    assert calls[1][0][-1]["tool_call_id"] == "call_repo"
+
+
+def test_github_tool_loop_rejects_unlisted_tool(app, monkeypatch):
+    calls = 0
+
+    def fake_openrouter(messages, model, temperature, max_tokens, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"choices": [{"message": {"content": None, "tool_calls": [{
+                "id": "call_bad", "type": "function", "function": {
+                    "name": "delete_repository", "arguments": '{"repo":"rz-ai-agent"}'
+                }
+            }]}}]}
+        assert '"error": "Tool is not allowed' in messages[-1]["content"]
+        return {"choices": [{"message": {"content": "I only have read-only GitHub access."}}]}
+
+    monkeypatch.setattr(app, "_call_openrouter", fake_openrouter)
+    monkeypatch.setattr(app, "_github_tool_call", lambda *args: (_ for _ in ()).throw(AssertionError("must not dispatch unknown tools")))
+    response = app._complete_message("You are helpful", "Check GitHub repo rz-ai-agent", "local:tools2", None, None, None)
+    assert response.reply == "I only have read-only GitHub access."
+    assert calls == 2
