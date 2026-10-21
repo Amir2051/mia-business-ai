@@ -61,6 +61,19 @@ OPENROUTER_ENDPOINT = os.getenv(
     "OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"
 ).strip()
 
+def _openrouter_chat_completions_url(endpoint: str) -> str:
+    """Accept either an OpenRouter API base URL or the full chat endpoint."""
+    endpoint = endpoint.strip().rstrip("/")
+    if endpoint.endswith("/chat/completions"):
+        return endpoint
+    if endpoint.endswith("/v1"):
+        return f"{endpoint}/chat/completions"
+    if endpoint.endswith("/api"):
+        return f"{endpoint}/v1/chat/completions"
+    if "://" in endpoint and endpoint.split("://", 1)[1].split("/", 1)[-1] == endpoint.split("://", 1)[1]:
+        return f"{endpoint}/api/v1/chat/completions"
+    return endpoint
+
 # ---------------------------------------------------------------- Hermes default (fallback)
 # The Hermes default inference API (Nous Research). Used when OpenRouter cannot
 # authenticate or fails so the assistant keeps replying.
@@ -164,7 +177,7 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens) 
         payload["max_tokens"] = max_tokens
     data = json.dumps(payload).encode("utf-8")
     req = URLRequest(
-        OPENROUTER_ENDPOINT,
+        _openrouter_chat_completions_url(OPENROUTER_ENDPOINT),
         data=data,
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
