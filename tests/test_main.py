@@ -614,3 +614,58 @@ def test_local_terminal_decision_cannot_approve_another_users_job(app):
     assert app._LOCAL_TERMINAL_QUEUE.empty()
     with app._LOCAL_TERMINAL_LOCK:
         app._LOCAL_TERMINAL_JOBS.pop(job_id, None)
+
+
+def test_inworld_voice_endpoint_returns_mp3_without_calling_llm(app, monkeypatch):
+    import base64
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(app, "INWORLD_API_KEY", "test-inworld-key")
+    monkeypatch.setattr(app, "INWORLD_VOICE_ID", "Ashley")
+    monkeypatch.setattr(app, "INWORLD_TTS_MODEL", "inworld-tts-2")
+    fake_audio = b"ID3" + (b"x" * 2048)
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return json.dumps({"audioContent": base64.b64encode(fake_audio).decode()}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["auth"] = request.get_header("Authorization")
+        captured["payload"] = json.loads(request.data.decode())
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(app, "urlopen", fake_urlopen)
+    client = TestClient(app.app)
+    response = client.post(
+        "/v1/voice/synthesize",
+        headers={"X-API-Key": "test-key"},
+        json={"text": "Hello from MIA", "language": "en-US"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.content == fake_audio
+    assert captured["url"] == "https://api.inworld.ai/tts/v1/voice"
+    assert captured["auth"] == "Basic test-inworld-key"
+    assert captured["payload"]["voiceId"] == "Ashley"
+    assert captured["payload"]["modelId"] == "inworld-tts-2"
+    assert captured["payload"]["text"] == "Hello from MIA"
+
+
+def test_inworld_voice_endpoint_requires_server_configuration(app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(app, "INWORLD_API_KEY", "")
+    response = TestClient(app.app).post(
+        "/v1/voice/synthesize",
+        headers={"X-API-Key": "test-key"},
+        json={"text": "Hello from MIA"},
+    )
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]

@@ -8,6 +8,12 @@ services:
     envVars:
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: INWORLD_API_KEY
+        sync: false
+      - key: INWORLD_VOICE_ID
+        value: Ashley
+      - key: INWORLD_TTS_MODEL
+        value: inworld-tts-2
       - key: OPENROUTER_MODEL
         value: openai/gpt-oss-20b
       - key: DATABASE_URL

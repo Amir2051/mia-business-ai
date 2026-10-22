@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "").strip()
+INWORLD_VOICE_ID = os.getenv("INWORLD_VOICE_ID", "Ashley").strip() or "Ashley"
+INWORLD_TTS_MODEL = os.getenv("INWORLD_TTS_MODEL", "inworld-tts-2").strip() or "inworld-tts-2"
+
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "MIA").strip() or "MIA"
 ASSISTANT_IDENTITY = (
     f"You are {ASSISTANT_NAME}, the user's personal AI assistant inside RZ Agent. "
@@ -353,6 +357,11 @@ class ChatRequest(BaseModel):
         default=ASSISTANT_IDENTITY,
         description="System prompt prepended to the conversation.",
     )
+
+
+class InworldSpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+    language: str = Field(default="auto", max_length=16)
 
 
 class ChatResponse(BaseModel):
@@ -1046,6 +1055,47 @@ def chat(request: ChatRequest, current_user: dict = Depends(require_app_user)):
         temperature=request.temperature,
         max_tokens=request.max_tokens,
     )
+
+
+@app.post("/v1/voice/synthesize")
+def synthesize_voice(request: InworldSpeechRequest, current_user: dict = Depends(require_app_user)):
+    """Speak MIA's existing text response with Inworld TTS; do not call another LLM."""
+    if not INWORLD_API_KEY:
+        raise HTTPException(status_code=503, detail="Inworld voice is not configured on the server")
+    payload = {
+        "text": request.text,
+        "voiceId": INWORLD_VOICE_ID,
+        "modelId": INWORLD_TTS_MODEL,
+        "audioConfig": {"audioEncoding": "MP3"},
+    }
+    if request.language and request.language != "auto":
+        payload["language"] = request.language
+    upstream = URLRequest(
+        "https://api.inworld.ai/tts/v1/voice",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": "Basic " + INWORLD_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(upstream, timeout=45) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        audio_content = result.get("audioContent")
+        if not isinstance(audio_content, str) or not audio_content:
+            raise HTTPException(status_code=502, detail="Inworld returned no audio content")
+        audio_bytes = base64.b64decode(audio_content, validate=True)
+    except HTTPException:
+        raise
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Inworld voice request failed (HTTP {exc.code})") from None
+    except (URLError, TimeoutError, ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=502, detail="Could not synthesize audio with Inworld") from None
+    if not audio_bytes:
+        raise HTTPException(status_code=502, detail="Inworld returned empty audio")
+    return Response(content=audio_bytes, media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/v1/conversations/{session_id}")
