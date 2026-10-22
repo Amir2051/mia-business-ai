@@ -23,7 +23,7 @@ Edit `.env` and set `RZ_API_KEY` and `OPENROUTER_API_KEY`. Keep `.env` private; 
 - Interactive API docs: `http://127.0.0.1:8788/docs`
 - Chat: `POST http://127.0.0.1:8788/v1/chat` with JSON `{"message":"Hello"}` and an `X-Api-Key` header matching `RZ_API_KEY`.
 
-The hosted default is `nvidia/nemotron-3.5-lightning:free`. OpenRouter routing privacy is controlled by `OPENROUTER_ZDR` (default `false` for the current testing configuration) and provider failover by `OPENROUTER_ALLOW_FALLBACKS` (default `true`). If ZDR is disabled, prompts may be processed under OpenRouter and the selected provider’s standard data policies; check those policies before using sensitive data.
+The hosted default is `nvidia/nemotron-3.5-lightning:free`, with `openrouter/free` as a one-time fallback for ordinary chat when the chosen endpoint is blocked or unavailable. OpenRouter routing privacy is controlled by `OPENROUTER_ZDR` (default `false` for the current testing configuration) and provider failover by `OPENROUTER_ALLOW_FALLBACKS` (default `true`). If ZDR is disabled, prompts may be processed under OpenRouter and the selected provider’s standard data policies; check those policies before using sensitive data.
 
 The service binds to loopback in the example command so it is not exposed to the network by default.
 
@@ -38,7 +38,7 @@ analysis/research requests. An explicit `model` in a chat request takes
 precedence. If either optional variable is empty, requests in that category
 continue to use the default model.
 
-OpenRouter requests read `provider.zdr` and `provider.allow_fallbacks` from the corresponding environment variables. Set `OPENROUTER_ZDR=true` only if the selected model has an available endpoint that meets your ZDR requirement. Keep model IDs compatible with the provider allowlist configured in your OpenRouter account. The app does not silently switch to Hermes after an OpenRouter failure; it returns a clear error instead.
+Cartesia voice synthesis uses `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CARTESIA_TTS_MODEL`, and `CARTESIA_VERSION`; keep the API key in an ignored local `.env` and the hosted service secret store, never in source control. The live transcription connection remains separate from MIA’s chat model. OpenRouter requests read `provider.zdr` and `provider.allow_fallbacks` from the corresponding environment variables. Set `OPENROUTER_ZDR=true` only if the selected model has an available endpoint that meets your ZDR requirement. Keep model IDs compatible with the provider allowlist configured in your OpenRouter account. The app does not silently switch to Hermes after an OpenRouter failure; it returns a clear error instead.
 
 
 ## Runtime capabilities and session cleanup

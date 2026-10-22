@@ -74,6 +74,36 @@ def test_inworld_realtime_session_token_is_minted_without_exposing_api_key(app, 
     assert len(calls) == 2
 
 
+def test_openrouter_retries_free_router_when_model_is_zdr_blocked(app, monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    monkeypatch.setattr(app, "OPENROUTER_FALLBACK_MODEL", "openrouter/free")
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return b'{"choices":[{"message":{"content":"Hello from fallback"}}]}'
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data.decode())
+        calls.append(payload["model"])
+        if len(calls) == 1:
+            raise HTTPError(request.full_url, 404, "Not Found", {}, BytesIO(
+                b'{"error":{"message":"0 endpoints out of 1 requested; ZDR violation (account settings)"}}'
+            ))
+        return FakeResponse()
+
+    monkeypatch.setattr(app, "urlopen", fake_urlopen)
+    result = app._call_openrouter([{"role": "user", "content": "hello"}], "nvidia/nemotron-3.5-lightning:free", None, None)
+    assert result["choices"][0]["message"]["content"] == "Hello from fallback"
+    assert calls == ["nvidia/nemotron-3.5-lightning:free", "openrouter/free"]
+
+
 def test_openrouter_provider_preferences_are_configurable(app, monkeypatch):
     captured = {}
 
@@ -676,14 +706,14 @@ def test_local_terminal_decision_cannot_approve_another_users_job(app):
         app._LOCAL_TERMINAL_JOBS.pop(job_id, None)
 
 
-def test_inworld_voice_endpoint_returns_mp3_without_calling_llm(app, monkeypatch):
-    import base64
+def test_cartesia_voice_endpoint_returns_wav_without_calling_llm(app, monkeypatch):
     from fastapi.testclient import TestClient
 
-    monkeypatch.setattr(app, "INWORLD_API_KEY", "test-inworld-key")
-    monkeypatch.setattr(app, "INWORLD_VOICE_ID", "Ashley")
-    monkeypatch.setattr(app, "INWORLD_TTS_MODEL", "inworld-tts-2")
-    fake_audio = b"ID3" + (b"x" * 2048)
+    monkeypatch.setattr(app, "CARTESIA_API_KEY", "test-cartesia-key")
+    monkeypatch.setattr(app, "CARTESIA_VOICE_ID", "test-voice-id")
+    monkeypatch.setattr(app, "CARTESIA_TTS_MODEL", "sonic-3.5")
+    monkeypatch.setattr(app, "CARTESIA_VERSION", "2026-08-14")
+    fake_audio = b"RIFF" + (b"x" * 2048)
     captured = {}
 
     class FakeResponse:
@@ -692,35 +722,38 @@ def test_inworld_voice_endpoint_returns_mp3_without_calling_llm(app, monkeypatch
         def __exit__(self, *args):
             return False
         def read(self):
-            return json.dumps({"audioContent": base64.b64encode(fake_audio).decode()}).encode()
+            return fake_audio
 
     def fake_urlopen(request, timeout):
         captured["url"] = request.full_url
-        captured["auth"] = request.get_header("Authorization")
+        captured["auth"] = request.get_header("X-api-key")
+        captured["version"] = request.get_header("Cartesia-version")
         captured["payload"] = json.loads(request.data.decode())
         captured["timeout"] = timeout
         return FakeResponse()
 
     monkeypatch.setattr(app, "urlopen", fake_urlopen)
-    client = TestClient(app.app)
-    response = client.post(
+    response = TestClient(app.app).post(
         "/v1/voice/synthesize",
         headers={"X-API-Key": "test-key"},
         json={"text": "Hello from MIA", "language": "en-US"},
     )
     assert response.status_code == 200
-    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.headers["content-type"] == "audio/wav"
     assert response.content == fake_audio
-    assert captured["url"] == "https://api.inworld.ai/tts/v1/voice"
-    assert captured["auth"] == "Basic test-inworld-key"
-    assert captured["payload"]["voiceId"] == "Ashley"
-    assert captured["payload"]["modelId"] == "inworld-tts-2"
-    assert captured["payload"]["text"] == "Hello from MIA"
+    assert captured["url"] == "https://api.cartesia.ai/tts/bytes"
+    assert captured["auth"] == "test-cartesia-key"
+    assert captured["version"] == "2026-08-14"
+    assert captured["payload"]["voice"] == {"mode": "id", "id": "test-voice-id"}
+    assert captured["payload"]["model_id"] == "sonic-3.5"
+    assert captured["payload"]["transcript"] == "Hello from MIA"
+    assert captured["payload"]["language"] == "en"
 
 
-def test_inworld_voice_endpoint_requires_server_configuration(app, monkeypatch):
+def test_cartesia_voice_endpoint_requires_server_configuration(app, monkeypatch):
     from fastapi.testclient import TestClient
 
+    monkeypatch.setattr(app, "CARTESIA_API_KEY", "")
     monkeypatch.setattr(app, "INWORLD_API_KEY", "")
     response = TestClient(app.app).post(
         "/v1/voice/synthesize",
@@ -728,4 +761,4 @@ def test_inworld_voice_endpoint_requires_server_configuration(app, monkeypatch):
         json={"text": "Hello from MIA"},
     )
     assert response.status_code == 503
-    assert "not configured" in response.json()["detail"]
+    assert "CARTESIA_API_KEY" in response.json()["detail"]

@@ -24,6 +24,10 @@ load_dotenv()
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "").strip()
 INWORLD_VOICE_ID = os.getenv("INWORLD_VOICE_ID", "Ashley").strip() or "Ashley"
 INWORLD_TTS_MODEL = os.getenv("INWORLD_TTS_MODEL", "inworld-tts-2").strip() or "inworld-tts-2"
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
+CARTESIA_VOICE_ID = os.getenv("CARTESIA_VOICE_ID", "e07c00bc-4134-4eae-9ea4-1a55fb45746b").strip()
+CARTESIA_TTS_MODEL = os.getenv("CARTESIA_TTS_MODEL", "sonic-3.5").strip() or "sonic-3.5"
+CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-08-14").strip() or "2026-08-14"
 
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "MIA").strip() or "MIA"
 ASSISTANT_IDENTITY = (
@@ -122,6 +126,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free").strip()
 OPENROUTER_ZDR = os.getenv("OPENROUTER_ZDR", "false").strip().lower() in {"1", "true", "yes", "on"}
 OPENROUTER_ALLOW_FALLBACKS = os.getenv("OPENROUTER_ALLOW_FALLBACKS", "true").strip().lower() in {"1", "true", "yes", "on"}
+OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "openrouter/free").strip() or "openrouter/free"
 OPENROUTER_CODING_MODEL = os.getenv("OPENROUTER_CODING_MODEL", "").strip()
 OPENROUTER_ANALYSIS_MODEL = os.getenv("OPENROUTER_ANALYSIS_MODEL", "").strip()
 
@@ -427,8 +432,43 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, 
         },
         method="POST",
     )
-    with urlopen(req, timeout=45) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(req, timeout=45) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read(12000).decode("utf-8", errors="replace")
+        # Account-level ZDR restrictions override per-request settings. For ordinary
+        # chat, try OpenRouter's free-model router once so a blocked endpoint does not
+        # make MIA completely unavailable. Keep tool-calling requests pinned because
+        # the router may select a model without the required tool support.
+        restricted = exc.code == 404 and any(
+            marker in body.lower()
+            for marker in ("zdr violation", "endpoints out of", "no endpoints")
+        )
+        fallback = OPENROUTER_FALLBACK_MODEL
+        if restricted and not tools and fallback and payload["model"] != fallback:
+            print("RZ_OPENROUTER_RETRY", {"reason": "endpoint_policy_or_availability", "fallback_model": fallback}, flush=True)
+            payload["model"] = fallback
+            fallback_req = URLRequest(
+                _openrouter_chat_completions_url(OPENROUTER_ENDPOINT),
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://rz-ai-agent.local",
+                    "X-Title": "RZ AI",
+                },
+                method="POST",
+            )
+            try:
+                with urlopen(fallback_req, timeout=45) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as fallback_exc:
+                fallback_body = fallback_exc.read(12000).decode("utf-8", errors="replace")
+                print("RZ_PROVIDER_ERROR", {"provider": "openrouter", "status": fallback_exc.code, "model": fallback, "message": fallback_body[:700]}, flush=True)
+                raise HTTPException(status_code=502, detail="OpenRouter blocked the configured model and its free-model fallback. Check OpenRouter Privacy/Guardrails ZDR restrictions or choose an eligible model.") from None
+        print("RZ_PROVIDER_ERROR", {"provider": "openrouter", "status": exc.code, "model": payload["model"], "message": body[:700]}, flush=True)
+        raise HTTPException(status_code=502, detail="OpenRouter rejected the model request. Check model availability and account Privacy/Guardrails restrictions.") from None
 
 
 def _call_hermes(messages: list[dict], model: str, temperature, max_tokens) -> dict:
@@ -1146,44 +1186,65 @@ def create_realtime_voice_token(current_user: dict = Depends(require_app_user)):
 
 @app.post("/v1/voice/synthesize")
 def synthesize_voice(request: InworldSpeechRequest, current_user: dict = Depends(require_app_user)):
-    """Speak MIA's existing text response with Inworld TTS; do not call another LLM."""
-    if not INWORLD_API_KEY:
-        raise HTTPException(status_code=503, detail="Inworld voice is not configured on the server")
+    """Speak MIA's existing text response with Cartesia Sonic; do not call another LLM."""
+    if not CARTESIA_API_KEY:
+        # Keep the deployed app speaking while Cartesia is being configured. Once
+        # CARTESIA_API_KEY is set, Cartesia is always preferred.
+        if INWORLD_API_KEY:
+            legacy_payload = {
+                "text": request.text,
+                "voiceId": INWORLD_VOICE_ID,
+                "modelId": INWORLD_TTS_MODEL,
+                "audioConfig": {"audioEncoding": "MP3"},
+            }
+            legacy_req = URLRequest(
+                "https://api.inworld.ai/tts/v1/voice",
+                data=json.dumps(legacy_payload).encode("utf-8"),
+                headers={"Authorization": "Basic " + INWORLD_API_KEY, "Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(legacy_req, timeout=45) as response:
+                    legacy_result = json.loads(response.read().decode("utf-8"))
+                legacy_audio = base64.b64decode(legacy_result.get("audioContent", ""), validate=True)
+                if legacy_audio:
+                    return Response(content=legacy_audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Voice-Provider": "inworld-fallback"})
+            except (HTTPError, URLError, TimeoutError, ValueError, KeyError, TypeError):
+                pass
+        raise HTTPException(status_code=503, detail="Voice is not configured. Set CARTESIA_API_KEY in the local .env and hosted service environment.")
     payload = {
-        "text": request.text,
-        "voiceId": INWORLD_VOICE_ID,
-        "modelId": INWORLD_TTS_MODEL,
-        "audioConfig": {"audioEncoding": "MP3"},
+        "model_id": CARTESIA_TTS_MODEL,
+        "transcript": request.text,
+        "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
+        "output_format": {"container": "wav", "encoding": "pcm_s16le", "sample_rate": 44100},
     }
-    if request.language and request.language != "auto":
-        payload["language"] = request.language
+    language = (request.language or "auto").strip()
+    if language and language.lower() != "auto":
+        payload["language"] = language.split("-")[0].lower()
     upstream = URLRequest(
-        "https://api.inworld.ai/tts/v1/voice",
+        "https://api.cartesia.ai/tts/bytes",
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "Authorization": "Basic " + INWORLD_API_KEY,
+            "X-API-Key": CARTESIA_API_KEY,
+            "Cartesia-Version": CARTESIA_VERSION,
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "audio/wav",
         },
         method="POST",
     )
     try:
         with urlopen(upstream, timeout=45) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        audio_content = result.get("audioContent")
-        if not isinstance(audio_content, str) or not audio_content:
-            raise HTTPException(status_code=502, detail="Inworld returned no audio content")
-        audio_bytes = base64.b64decode(audio_content, validate=True)
-    except HTTPException:
-        raise
+            audio_bytes = response.read()
     except HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Inworld voice request failed (HTTP {exc.code})") from None
-    except (URLError, TimeoutError, ValueError, KeyError, TypeError):
-        raise HTTPException(status_code=502, detail="Could not synthesize audio with Inworld") from None
+        # Never return provider response bodies; they can contain internal diagnostics.
+        print("CARTESIA_TTS_ERROR", {"status": exc.code}, flush=True)
+        raise HTTPException(status_code=502, detail=f"Cartesia voice request failed (HTTP {exc.code}). Check the API key, voice ID, and model.") from None
+    except (URLError, TimeoutError, ValueError):
+        print("CARTESIA_TTS_ERROR", {"error_type": "connection_or_response_error"}, flush=True)
+        raise HTTPException(status_code=502, detail="Could not connect to Cartesia voice service") from None
     if not audio_bytes:
-        raise HTTPException(status_code=502, detail="Inworld returned empty audio")
-    return Response(content=audio_bytes, media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
-
+        raise HTTPException(status_code=502, detail="Cartesia returned empty audio")
+    return Response(content=audio_bytes, media_type="audio/wav", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 @app.post("/v1/conversations/{session_id}")
 def reset_conversation(session_id: str, current_user: dict = Depends(require_app_user)):
