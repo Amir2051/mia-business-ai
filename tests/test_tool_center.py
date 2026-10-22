@@ -43,8 +43,7 @@ def test_tool_center_requires_auth_and_permissions_are_per_user(client):
 
 
 def test_document_analysis_extracts_only_supported_uploads(client, monkeypatch):
-    c, headers = client
-    monkeypatch.setattr("app.capabilities.extract_document", lambda filename, encoded: {
+    c, headers = client    monkeypatch.setattr("app.capabilities.extract_document", lambda filename, encoded: {
         "filename": filename, "text": "A short test document.", "characters": 22,
         "truncated": False, "format": "txt"
     })
