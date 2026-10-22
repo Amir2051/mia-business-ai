@@ -745,6 +745,12 @@ def _complete_message(
 
 # ---------------------------------------------------------------- endpoints
 
+@app.get("/settings/mcp", response_class=HTMLResponse)
+def mcp_settings_page():
+    """Serve the signed-in MCP connection and API-token management page."""
+    return (Path(__file__).parent / "mcp_settings.html").read_text(encoding="utf-8")
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     return (Path(__file__).parent / "ui.html").read_text(encoding="utf-8")
