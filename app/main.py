@@ -355,7 +355,7 @@ class ChatResponse(BaseModel):
 
 def _base_messages(system: str, user_content: str, session_id: str) -> list[dict]:
     messages: list[dict] = [
-        {"role": "system", "content": ASSISTANT_IDENTITY + ("\\n\\n" + system if system and system.strip() else "")}
+        {"role": "system", "content": ASSISTANT_IDENTITY + ("\n\n" + system if system and system.strip() else "")}
     ]
     # Only include explicitly saved memories for the owner encoded in this session.
     owner_id = session_id.split(":", 1)[0] if isinstance(session_id, str) and ":" in session_id else ""
