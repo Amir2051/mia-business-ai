@@ -48,6 +48,14 @@ an OpenRouter error, because Hermes' endpoint has not been verified for this
 ZDR requirement. It returns a clear failure instead. Hermes can be used as the
 primary provider only when OpenRouter is not configured.
 
+An optional local Ollama fallback is available with `OLLAMA_BASE_URL` and
+`OLLAMA_MODEL` (for example, `http://127.0.0.1:11434` and `qwen3:1.7b` on a
+local machine). It calls Ollama's native `/api/chat` endpoint and only runs after
+the configured primary provider fails or returns no usable text. This request is
+sent to the configured Ollama server, not OpenRouter. **A hosted Render service
+cannot reach `127.0.0.1` on your Kali computer**; hosted use requires a secure,
+authenticated private connection to Ollama. Do not expose port 11434 publicly.
+
 
 ## Runtime capabilities and session cleanup
 

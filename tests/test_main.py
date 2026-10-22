@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -12,6 +13,7 @@ from unittest import mock  # noqa: E402
 def app(monkeypatch):
     # Force local API-key mode even if the developer has a private .env file.
     monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "")
     os.environ["RZ_API_KEY"] = "test-key"
     os.environ["OPENROUTER_API_KEY"] = "real"
     os.environ["HERMES_API_KEY"] = "hermes-secret"
@@ -446,3 +448,107 @@ def test_api_token_creation_returns_secret_once_and_stores_only_hash(app, monkey
     assert result["token"].startswith("rzat_")
     assert result["warning"].endswith("cannot be displayed again.")
     assert result["scopes"] == ["mcp:call", "mcp:read"]
+
+
+def test_local_terminal_bridge_requires_dedicated_token(app, monkeypatch):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    monkeypatch.setattr(app, "MIA_TERMINAL_BRIDGE_TOKEN", "bridge-test-secret")
+    denied = client.get("/v1/local-terminal/next")
+    assert denied.status_code == 401
+    accepted = client.get(
+        "/v1/local-terminal/next",
+        headers={"X-Bridge-Token": "bridge-test-secret"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json() == {"job": None}
+
+
+def test_local_terminal_bridge_returns_approved_result_to_waiting_job(app, monkeypatch):
+    from fastapi.testclient import TestClient
+    import queue
+    import threading
+    client = TestClient(app.app)
+    monkeypatch.setattr(app, "MIA_TERMINAL_BRIDGE_TOKEN", "bridge-test-secret")
+    job_id = "a" * 32
+    event = threading.Event()
+    job = {
+        "id": job_id, "command": "pwd", "workspace": "dev-terminal",
+        "event": event, "result": None, "created": app.time.time()
+    }
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS[job_id] = job
+    app._LOCAL_TERMINAL_QUEUE.put({"id": job_id, "command": "pwd", "workspace": "dev-terminal"})
+    next_job = client.get(
+        "/v1/local-terminal/next",
+        headers={"X-Bridge-Token": "bridge-test-secret"},
+    ).json()["job"]
+    assert next_job == {"id": job_id, "command": "pwd", "workspace": "dev-terminal"}
+    response = client.post(
+        f"/v1/local-terminal/results/{job_id}",
+        headers={"X-Bridge-Token": "bridge-test-secret"},
+        json={"status": "completed", "output": "actual output"},
+    )
+    assert response.status_code == 200
+    assert event.is_set()
+    assert job["result"] == {"status": "completed", "output": "actual output"}
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS.pop(job_id, None)
+
+
+def test_local_terminal_tool_loop_uses_real_tool_result_and_never_executes_directly(app, monkeypatch):
+    calls = []
+    def fake_openrouter(messages, model, temperature, max_tokens, tools=None, tool_choice="auto"):
+        calls.append({"tools": tools, "tool_choice": tool_choice, "messages": messages})
+        if len(calls) == 1:
+            return {"choices": [{"message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_local_1", "type": "function",
+                    "function": {"name": "mia_request_local_command",
+                                 "arguments": json.dumps({"command": "pwd", "workspace": "dev-terminal"})}
+                }]
+            }}]}
+        assert any(m.get("role") == "tool" and "actual local output" in m.get("content", "") for m in messages)
+        return {"choices": [{"message": {"content": "The local command returned actual local output."}}]}
+    monkeypatch.setattr(app, "_call_openrouter", fake_openrouter)
+    monkeypatch.setattr(app, "_request_local_terminal_command", lambda command, workspace: {
+        "status": "completed", "output": "actual local output"
+    })
+    result = app._complete_with_local_terminal_tools(
+        app.ASSISTANT_IDENTITY, "run a command on my Kali machine", "test-user:session", None, None, 500
+    )
+    assert result["choices"][0]["message"]["content"].startswith("The local command")
+    assert calls[0]["tool_choice"] == "required"
+    assert calls[0]["tools"][0]["function"]["name"] == "mia_request_local_command"
+
+
+def test_ollama_is_used_as_local_fallback_after_openrouter_failure(app, monkeypatch):
+    monkeypatch.setattr(app, "OLLAMA_ENABLED", True)
+    monkeypatch.setattr(app, "OLLAMA_MODEL", "qwen3:1.7b")
+
+    def fail_openrouter(*args, **kwargs):
+        raise RuntimeError("simulated OpenRouter ZDR/provider rejection")
+
+    def local_ollama(messages, model, temperature, max_tokens, tools=None, tool_choice="auto"):
+        assert model == "qwen3:1.7b"
+        assert messages[-1]["content"] == "Say local fallback works"
+        return {"model": model, "choices": [{"message": {"role": "assistant", "content": "Local Qwen fallback works."}}]}
+
+    monkeypatch.setattr(app, "_call_openrouter", fail_openrouter)
+    monkeypatch.setattr(app, "_call_ollama", local_ollama)
+    resp = app._complete_message("s", "Say local fallback works", "ollama-test", None, None, 80)
+    assert resp.status == "ok"
+    assert resp.provider == "ollama"
+    assert resp.model == "qwen3:1.7b"
+    assert resp.reply == "Local Qwen fallback works."
+
+
+def test_ollama_fallback_can_recover_from_empty_openrouter_reply(app, monkeypatch):
+    monkeypatch.setattr(app, "OLLAMA_ENABLED", True)
+    monkeypatch.setattr(app, "OLLAMA_MODEL", "qwen3:1.7b")
+    monkeypatch.setattr(app, "_call_openrouter", lambda *args, **kwargs: {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+    monkeypatch.setattr(app, "_call_ollama", lambda *args, **kwargs: {"model": "qwen3:1.7b", "choices": [{"message": {"content": "Recovered locally."}}]})
+    resp = app._complete_message("s", "hello", "ollama-empty-test", None, None, 80)
+    assert resp.provider == "ollama"
+    assert resp.reply == "Recovered locally."
