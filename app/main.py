@@ -620,7 +620,7 @@ LOCAL_TERMINAL_TOOL = {
         "description": (
             "Request one read-only command on the user's own Kali machine. "
             "Use only when the user explicitly asks to inspect or run something locally. "
-            "The local user must approve each command; arbitrary shell syntax is forbidden."
+            "The user must approve each command in the authenticated MIA chat UI before the local worker receives it; arbitrary shell syntax is forbidden."
         ),
         "parameters": {
             "type": "object",
@@ -654,7 +654,7 @@ def _should_offer_local_terminal_tools(message: str) -> bool:
     return any(signal in text for signal in signals)
 
 
-def _request_local_terminal_command(command: str, workspace: str) -> dict:
+def _request_local_terminal_command(command: str, workspace: str, owner_id: str = "local") -> dict:
     if command not in {
         "pwd", "python3 --version", "uname -a", "git status --short",
         "git log -1 --oneline", "git branch --show-current", "ls -la"
@@ -671,18 +671,14 @@ def _request_local_terminal_command(command: str, workspace: str) -> dict:
     event = threading.Event()
     job = {
         "id": job_id, "command": command, "workspace": workspace,
+        "owner_id": owner_id, "approval": "pending", "status": "pending_approval",
         "event": event, "result": None, "created": time.time()
     }
     with _LOCAL_TERMINAL_LOCK:
         if len(_LOCAL_TERMINAL_JOBS) >= 20:
             return {"status": "busy", "message": "Local command queue is full."}
         _LOCAL_TERMINAL_JOBS[job_id] = job
-    try:
-        _LOCAL_TERMINAL_QUEUE.put({"id": job_id, "command": command, "workspace": workspace}, timeout=1)
-    except queue.Full:
-        with _LOCAL_TERMINAL_LOCK:
-            _LOCAL_TERMINAL_JOBS.pop(job_id, None)
-        return {"status": "busy", "message": "Local command queue is full."}
+    # The browser approval endpoint enqueues this job only after explicit approval.
     if not event.wait(_LOCAL_TERMINAL_MAX_WAIT):
         with _LOCAL_TERMINAL_LOCK:
             _LOCAL_TERMINAL_JOBS.pop(job_id, None)
@@ -732,7 +728,8 @@ def _complete_with_local_terminal_tools(system, user_content, session_id, model,
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 if not isinstance(args, dict) or set(args) != {"command", "workspace"}:
                     raise ValueError("Tool arguments must contain only command and workspace.")
-                tool_result = _request_local_terminal_command(args["command"], args["workspace"])
+                owner_id = session_id.split(":", 1)[0] if ":" in session_id else "local"
+                tool_result = _request_local_terminal_command(args["command"], args["workspace"], owner_id)
             except (ValueError, TypeError, json.JSONDecodeError, KeyError) as exc:
                 tool_result = {"status": "blocked", "message": str(exc)[:300]}
             messages.append({
@@ -946,6 +943,53 @@ def _require_local_bridge(x_bridge_token: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing local bridge token")
 
 
+@app.get("/v1/local-terminal/pending")
+def local_terminal_pending(current_user: dict = Depends(require_app_user)):
+    """List only this user's local commands awaiting approval in the MIA UI."""
+    owner_id = str(current_user.get("id", ""))
+    now = time.time()
+    with _LOCAL_TERMINAL_LOCK:
+        pending = [
+            {"id": job["id"], "command": job["command"], "workspace": job["workspace"], "created": job["created"]}
+            for job in _LOCAL_TERMINAL_JOBS.values()
+            if job.get("owner_id") == owner_id
+            and job.get("approval") == "pending"
+            and now - job.get("created", now) <= _LOCAL_TERMINAL_MAX_WAIT
+        ]
+    pending.sort(key=lambda item: item["created"])
+    return {"jobs": pending[:10]}
+
+
+@app.post("/v1/local-terminal/decision/{job_id}")
+def local_terminal_decision(job_id: str, decision: dict, current_user: dict = Depends(require_app_user)):
+    """Approve or deny a pending local command from the authenticated MIA UI."""
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    action = decision.get("decision")
+    if action not in {"approve", "deny"}:
+        raise HTTPException(status_code=400, detail="Decision must be approve or deny")
+    owner_id = str(current_user.get("id", ""))
+    with _LOCAL_TERMINAL_LOCK:
+        job = _LOCAL_TERMINAL_JOBS.get(job_id)
+        if job is None or job.get("owner_id") != owner_id:
+            raise HTTPException(status_code=404, detail="Pending local command not found")
+        if job.get("approval") != "pending":
+            raise HTTPException(status_code=409, detail="This command already has a decision")
+        if action == "deny":
+            job["approval"] = "denied"
+            job["status"] = "denied"
+            job["result"] = {"status": "denied", "message": "User denied local command execution."}
+            job["event"].set()
+            return {"status": "ok", "decision": "deny"}
+        try:
+            _LOCAL_TERMINAL_QUEUE.put_nowait({"id": job_id, "command": job["command"], "workspace": job["workspace"]})
+        except queue.Full:
+            raise HTTPException(status_code=503, detail="Local command queue is full") from None
+        job["approval"] = "approved"
+        job["status"] = "queued"
+    return {"status": "ok", "decision": "approve"}
+
+
 @app.get("/v1/local-terminal/next")
 def local_terminal_next(_bridge=Depends(_require_local_bridge)):
     try:
@@ -953,8 +997,10 @@ def local_terminal_next(_bridge=Depends(_require_local_bridge)):
     except queue.Empty:
         return {"job": None}
     with _LOCAL_TERMINAL_LOCK:
-        if job["id"] not in _LOCAL_TERMINAL_JOBS:
+        stored = _LOCAL_TERMINAL_JOBS.get(job["id"])
+        if stored is None or stored.get("approval") != "approved" or stored.get("status") != "queued":
             return {"job": None}
+        stored["status"] = "running"
     return {"job": {"id": job["id"], "command": job["command"], "workspace": job["workspace"]}}
 
 
@@ -975,6 +1021,7 @@ def local_terminal_result(job_id: str, result: dict, _bridge=Depends(_require_lo
         if job is None:
             raise HTTPException(status_code=404, detail="Local command job not found or expired")
         job["result"] = safe_result
+        job["status"] = status
         job["event"].set()
     return {"status": "ok", "accepted": True}
 
