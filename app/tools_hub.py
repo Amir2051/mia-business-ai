@@ -31,7 +31,7 @@ REGISTRY = {
     "github_comment_pr": {"label": "Comment on pull request", "category": "connected services", "risk": "high", "mode": "external_write", "description": "Post a comment to a pull request in an allowlisted Amir2051 repository.", "approval_required": True},
     "image_generation": {"label": "Image generation", "category": "creative", "risk": "cost", "mode": "paid_action", "description": "Generate an image through the configured provider; may incur usage charges.", "approval_required": True},
 }
-DEFAULT_PERMISSIONS = {name: (name not in {"github_create_issue", "github_comment_pr"}) for name in REGISTRY}
+DEFAULT_PERMISSIONS = {name: (name not in {"github_create_issue", "github_comment_pr", "image_generation"}) for name in REGISTRY}
 HIGH_RISK = {"github_create_issue", "github_comment_pr", "image_generation", "saved_memory", "task_plans"}
 OWNER = "Amir2051"
 
