@@ -59,10 +59,10 @@ def callback(code:str="",state:str="",error:str=""):
   if not row or row[1]<time.time(): raise HTTPException(400,"OAuth state invalid or expired.")
   q="DELETE FROM rz_social_oauth_states WHERE state_hash=%s" if k=="postgres" else "DELETE FROM rz_social_oauth_states WHERE state_hash=?"; c.execute(q,(digest,)); c.commit(); uid=row[0]
  finally:c.close()
- token=_request("oauth/access_token",{"client_id":app_id,"client_secret":secret,"redirect_uri":redirect,"code":code}).get("access_token")
+ token=_request("oauth/access_token",{"client_id":app_id,"client_secret":secret,"redirect_uri":redirect,"code":code},post=True).get("access_token")
  if not isinstance(token,str) or not token: raise HTTPException(502,"Meta did not return an access token.")
- long=_request("oauth/access_token",{"grant_type":"fb_exchange_token","client_id":app_id,"client_secret":secret,"fb_exchange_token":token}); token=long.get("access_token",token)
- pages=_request("me/accounts",{"fields":"id,name,access_token,instagram_business_account{id,username}","access_token":token}).get("data",[])
+ long=_request("oauth/access_token",{"grant_type":"fb_exchange_token","client_id":app_id,"client_secret":secret,"fb_exchange_token":token},post=True); token=long.get("access_token",token)
+ pages=_request("me/accounts",{"fields":"id,name,access_token,instagram_business_account{id,username}","access_token":token},post=True).get("data",[])
  c,k=_db(); saved=[]
  try:
   for p in pages:

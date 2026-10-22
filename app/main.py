@@ -1151,8 +1151,10 @@ def chat(request: ChatRequest, current_user: dict = Depends(require_app_user)):
     else:
         session_id = prefix + (request.session_id or uuid.uuid4().hex[:12])
     selected_model = _select_model_for_task(request.message, request.model)
+    from app.user_preferences import personalized_system
+    effective_system = personalized_system(current_user.get("id", ""), request.system)
     return _complete_message(
-        system=request.system,
+        system=effective_system,
         user_content=request.message,
         session_id=session_id,
         model=selected_model,
@@ -1699,3 +1701,6 @@ app.include_router(social_marketing_router)
 
 from app.slack_channel import router as slack_channel_router
 app.include_router(slack_channel_router)
+
+from app.user_preferences import router as user_preferences_router
+app.include_router(user_preferences_router)
