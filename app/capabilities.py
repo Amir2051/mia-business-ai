@@ -28,7 +28,7 @@ MAX_TASKS_PER_USER = 50
 
 class _SearchParser(HTMLParser):
     """Extract safe organic results from DDG HTML/lite and Bing HTML pages."""
-    def __init__(self, engine: str):
+    def __init__(self, engine: str = "DuckDuckGo HTML"):
         super().__init__(convert_charrefs=True)
         self.engine = engine
         self.items = []
@@ -104,6 +104,10 @@ class _SearchParser(HTMLParser):
 
     def finish(self):
         self._finish_result()
+
+
+# Backwards-compatible name used by existing parser tests and integrations.
+_DDGParser = _SearchParser
 
 
 def _html_search(url: str, engine: str, limit: int) -> list[dict]:
