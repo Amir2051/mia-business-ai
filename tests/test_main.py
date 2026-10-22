@@ -33,10 +33,11 @@ def app(monkeypatch):
 
 def test_mia_core_identity_always_knows_rz_and_rz_agent(app):
     identity = app.ASSISTANT_IDENTITY.lower()
-    assert "rz, also known as ronzoro" in identity
-    assert "creator and operator" in identity
-    assert "rz agent is the platform" in identity
-    assert "do not say rz is unknown" in identity
+    assert "computer scientist and hacker" in identity
+    assert "creator of mia and cynthara" in identity
+    assert "authored the eight books" in identity
+    assert "do not reduce rz's identity to an author" in identity
+    assert "never say he is unknown" in identity
     assert "does not grant permission" in identity
 
 
