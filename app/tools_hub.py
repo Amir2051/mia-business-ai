@@ -29,7 +29,7 @@ REGISTRY = {
     "github_read": {"label": "GitHub read", "category": "connected services", "risk": "low", "mode": "read", "description": "Read repository metadata, issues, pull requests, and text files for Amir2051-owned repositories.", "approval_required": False},
     "github_create_issue": {"label": "Create GitHub issue", "category": "connected services", "risk": "high", "mode": "external_write", "description": "Create an issue in an allowlisted Amir2051 repository.", "approval_required": True},
     "github_comment_pr": {"label": "Comment on pull request", "category": "connected services", "risk": "high", "mode": "external_write", "description": "Post a comment to a pull request in an allowlisted Amir2051 repository.", "approval_required": True},
-    "image_generation": {"label": "Image generation", "category": "creative", "risk": "cost", "mode": "paid_action", "description": "Generate an image through the configured provider; may incur usage charges.", "approval_required": True},
+    "image_generation": {"label": "Image generation (not wired)", "category": "creative", "risk": "cost", "mode": "unavailable", "description": "Reserved for a future approved adapter; not executable in this release.", "approval_required": True},
 }
 DEFAULT_PERMISSIONS = {name: (name not in {"github_create_issue", "github_comment_pr", "image_generation"}) for name in REGISTRY}
 HIGH_RISK = {"github_create_issue", "github_comment_pr", "image_generation", "saved_memory", "task_plans"}
