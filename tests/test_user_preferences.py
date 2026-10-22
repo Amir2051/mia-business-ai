@@ -22,6 +22,18 @@ def test_preferences_are_saved_and_used_for_user(monkeypatch, tmp_path):
         assert 'warm, encouraging' in system
         assert 'Use practical examples.' in system
         assert 'useful detail' in system
+        # Verify the real chat endpoint supplies saved preferences to MIA's completion layer.
+        captured = {}
+        def fake_complete_message(**kwargs):
+            captured.update(kwargs)
+            return {'reply': 'test reply', 'session_id': kwargs['session_id'], 'provider': 'test'}
+        monkeypatch.setattr(module, '_complete_message', fake_complete_message)
+        chat_response = client.post('/v1/chat', headers=headers, json={'message': 'Explain a concept'})
+        assert chat_response.status_code == 200
+        assert 'warm, encouraging' in captured['system']
+        assert 'Use practical examples.' in captured['system']
+        assert 'Preferred response language: en' in captured['system']
+        assert 'useful detail' in captured['system']
     finally:
         client.close()
         sys.modules.pop('app.main',None)
