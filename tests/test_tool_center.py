@@ -7,6 +7,24 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
+def app(tmp_path, monkeypatch):
+    import os, sys
+    monkeypatch.setenv("RZ_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-provider-key")
+    monkeypatch.setenv("RZ_LOCAL_DATA_PATH", str(tmp_path / "tool-center.sqlite3"))
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.delenv("IMAGE_GENERATION_ENDPOINT", raising=False)
+    monkeypatch.delenv("IMAGE_GENERATION_API_KEY", raising=False)
+    monkeypatch.delenv("IMAGE_GENERATION_MODEL", raising=False)
+    sys.modules.pop("app.main", None)
+    import app.main as module
+    yield module
+    with module._store_lock:
+        module._conversations.clear()
+    sys.modules.pop("app.main", None)
+
+
+@pytest.fixture
 def client(app):
     return TestClient(app.app), {"X-API-Key": "test-key"}
 
