@@ -26,30 +26,36 @@ MAX_RESULTS = 8
 MAX_MEMORY = 2000
 MAX_TASKS_PER_USER = 50
 
-class _DDGParser(HTMLParser):
-    """Extract complete DuckDuckGo result records without dropping snippets."""
-    def __init__(self):
+class _SearchParser(HTMLParser):
+    """Extract safe organic results from DDG HTML/lite and Bing HTML pages."""
+    def __init__(self, engine: str):
         super().__init__(convert_charrefs=True)
+        self.engine = engine
         self.items = []
         self.current = None
         self.capture = None
         self.text = []
+        self.in_bing_result = False
 
     def _finish_result(self):
         if self.current and self.current.get("title") and self.current.get("url"):
-            url = self.current["url"].strip()
-            # DuckDuckGo may wrap destinations in relative or absolute /l/?uddg= redirects.
             from urllib.parse import parse_qs, urljoin, urlparse
+            url = self.current["url"].strip()
             if url.startswith("/") or url.startswith("//"):
-                url = urljoin("https://duckduckgo.com", url)
+                url = urljoin("https://duckduckgo.com" if self.engine.startswith("DuckDuckGo") else "https://www.bing.com", url)
             parsed = urlparse(url)
             if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path == "/l/":
                 url = parse_qs(parsed.query).get("uddg", [""])[0]
-            if url.startswith("https://") and not any(item["url"] == url for item in self.items):
-                self.current["url"] = url[:2000]
-                self.current["title"] = self.current["title"][:500]
-                self.current["snippet"] = self.current.get("snippet", "")[:1200]
-                self.items.append(self.current)
+            parsed = urlparse(url)
+            if parsed.scheme == "https" and parsed.hostname and parsed.hostname not in {
+                "duckduckgo.com", "www.duckduckgo.com", "html.duckduckgo.com",
+                "bing.com", "www.bing.com"
+            } and not any(item["url"] == url for item in self.items):
+                self.items.append({
+                    "title": self.current["title"].strip()[:500],
+                    "url": url[:2000],
+                    "snippet": self.current.get("snippet", "").strip()[:1200],
+                })
         self.current = None
         self.capture = None
         self.text = []
@@ -57,14 +63,27 @@ class _DDGParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = set(attrs.get("class", "").split())
-        if tag == "a" and "result__a" in classes:
-            self._finish_result()
-            self.current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
-            self.capture = "title"
-            self.text = []
-        elif self.current and "result__snippet" in classes and tag in {"a", "div"}:
-            self.capture = "snippet"
-            self.text = []
+        if self.engine == "Bing HTML":
+            if tag == "li" and "b_algo" in classes:
+                self._finish_result()
+                self.in_bing_result = True
+                self.current = {"title": "", "url": "", "snippet": ""}
+            elif self.in_bing_result and tag == "a" and attrs.get("href", "").startswith("https://") and not self.current.get("title"):
+                self.current["url"] = attrs.get("href", "")
+                self.capture = "title"
+                self.text = []
+            elif self.in_bing_result and ("b_caption" in classes or tag == "p") and self.current:
+                self.capture = "snippet"
+                self.text = []
+        else:
+            if tag == "a" and ({"result__a", "result-link"} & classes):
+                self._finish_result()
+                self.current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
+                self.capture = "title"
+                self.text = []
+            elif self.current and ({"result__snippet", "result-snippet"} & classes):
+                self.capture = "snippet"
+                self.text = []
 
     def handle_data(self, data):
         if self.capture:
@@ -72,8 +91,11 @@ class _DDGParser(HTMLParser):
 
     def handle_endtag(self, tag):
         if not self.capture:
+            if self.engine == "Bing HTML" and tag == "li" and self.in_bing_result:
+                self._finish_result()
+                self.in_bing_result = False
             return
-        if (self.capture == "title" and tag == "a") or (self.capture == "snippet" and tag in {"a", "div"}):
+        if (self.capture == "title" and tag == "a") or (self.capture == "snippet" and tag in {"a", "div", "p"}):
             value = " ".join(" ".join(self.text).split())
             if self.current is not None:
                 self.current[self.capture] = value
@@ -83,40 +105,77 @@ class _DDGParser(HTMLParser):
     def finish(self):
         self._finish_result()
 
+
+def _html_search(url: str, engine: str, limit: int) -> list[dict]:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.8",
+        },
+        method="GET",
+    )
+    with urlopen(req, timeout=10) as response:
+        raw = response.read(750_001)
+    if len(raw) > 750_000:
+        raise ValueError("Search response exceeded the size limit")
+    parser = _SearchParser(engine)
+    parser.feed(raw.decode("utf-8", "replace"))
+    parser.finish()
+    return parser.items[:limit]
+
+
 def web_research(query: str, limit: int = 5) -> dict:
     if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY:
         raise ValueError(f"query must contain 1–{MAX_QUERY} characters")
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_RESULTS:
         raise ValueError(f"limit must be from 1 to {MAX_RESULTS}")
-    brave_key = os.getenv('BRAVE_SEARCH_API_KEY', '').strip()
+    query = query.strip()
+    brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
+    errors = []
     if brave_key:
-        url = 'https://api.search.brave.com/res/v1/web/search?q=' + quote_plus(query.strip()) + '&count=' + str(limit)
-        req = Request(url, headers={'Accept': 'application/json', 'X-Subscription-Token': brave_key, 'User-Agent': 'RZ-Agent/1.0'}, method='GET')
+        url = "https://api.search.brave.com/res/v1/web/search?q=" + quote_plus(query) + "&count=" + str(limit)
+        req = Request(url, headers={"Accept": "application/json", "X-Subscription-Token": brave_key, "User-Agent": "MIA-RZ/1.0"}, method="GET")
         try:
-            with urlopen(req, timeout=12) as response: raw = response.read(750_001)
-            if len(raw) > 750_000: raise ValueError('Search response exceeded the size limit')
-            data = json.loads(raw.decode('utf-8'))
-            web = data.get('web', {}).get('results', []) if isinstance(data, dict) else []
-            results = [{'title': str(item.get('title',''))[:500], 'url': str(item.get('url',''))[:2000], 'snippet': str(item.get('description',''))[:1200]} for item in web[:limit] if isinstance(item,dict) and str(item.get('url','')).startswith('https://')]
-            if not results: raise RuntimeError('Search provider returned no usable results')
-            return {'query': query.strip(), 'results': results, 'count': len(results), 'source': 'Brave Search'}
-        except HTTPError as exc: raise RuntimeError(f'Brave Search returned HTTP {exc.code}') from None
-        except URLError: raise RuntimeError('Brave Search is unreachable') from None
-        except (UnicodeDecodeError, json.JSONDecodeError): raise RuntimeError('Brave Search returned invalid JSON') from None
-    # Unauthenticated HTML search is attempted only as a convenience; if blocked,
-    # return an explicit error rather than pretending research succeeded.
-    url = 'https://html.duckduckgo.com/html/?q=' + quote_plus(query.strip())
-    req = Request(url, headers={'User-Agent': 'Mozilla/5.0 (compatible; RZ-Agent/1.0)', 'Accept': 'text/html'}, method='GET')
-    try:
-        with urlopen(req, timeout=12) as response: raw = response.read(750_001)
-        if len(raw) > 750_000: raise ValueError('Search response exceeded the size limit')
-        parser = _DDGParser(); parser.feed(raw.decode('utf-8', 'replace')); parser.finish()
-        results = parser.items[:limit]
-        if not results: raise RuntimeError('Unauthenticated web search returned no results. Configure BRAVE_SEARCH_API_KEY to enable reliable web research.')
-        return {'query': query.strip(), 'results': results, 'count': len(results), 'source': 'DuckDuckGo HTML'}
-    except HTTPError as exc: raise RuntimeError(f'Web search provider returned HTTP {exc.code}') from None
-    except URLError: raise RuntimeError('Web search provider is unreachable') from None
+            with urlopen(req, timeout=12) as response:
+                raw = response.read(750_001)
+            if len(raw) > 750_000:
+                raise ValueError("Search response exceeded the size limit")
+            data = json.loads(raw.decode("utf-8"))
+            web = data.get("web", {}).get("results", []) if isinstance(data, dict) else []
+            results = [{"title": str(item.get("title", ""))[:500], "url": str(item.get("url", ""))[:2000], "snippet": str(item.get("description", ""))[:1200]} for item in web[:limit] if isinstance(item, dict) and str(item.get("url", "")).startswith("https://")]
+            if results:
+                return {"query": query, "results": results, "count": len(results), "source": "Brave Search"}
+            errors.append("Brave Search returned no usable results")
+        except HTTPError as exc:
+            # A configured but invalid key should be fixed rather than silently bypassed.
+            raise RuntimeError(f"Brave Search returned HTTP {exc.code}; verify BRAVE_SEARCH_API_KEY") from None
+        except URLError:
+            errors.append("Brave Search is unreachable")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            errors.append("Brave Search returned invalid JSON")
 
+    # Best-effort no-key search: try both DDG HTML variants and Bing, because any
+    # single HTML endpoint may rate-limit cloud-hosted requests or change markup.
+    encoded = quote_plus(query)
+    engines = [
+        ("DuckDuckGo HTML", "https://html.duckduckgo.com/html/?q=" + encoded),
+        ("DuckDuckGo Lite", "https://lite.duckduckgo.com/lite/?q=" + encoded),
+        ("Bing HTML", "https://www.bing.com/search?q=" + encoded),
+    ]
+    for engine, url in engines:
+        try:
+            results = _html_search(url, engine, limit)
+            if results:
+                return {"query": query, "results": results, "count": len(results), "source": engine}
+            errors.append(engine + " returned no usable results")
+        except HTTPError as exc:
+            errors.append(f"{engine} returned HTTP {exc.code}")
+        except (URLError, TimeoutError):
+            errors.append(engine + " is unreachable")
+    detail = "; ".join(errors[-3:])
+    raise RuntimeError("Web search could not retrieve usable results from available providers. " + detail + ". Configure BRAVE_SEARCH_API_KEY for authenticated, more reliable search.")
 
 def _db():
     """Persistent Postgres when DATABASE_URL exists; local SQLite for development."""
