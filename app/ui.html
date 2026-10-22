@@ -41,6 +41,76 @@ input,textarea,select{background:#07111d;border-color:#234257;border-radius:11px
 .empty{font-family:var(--terminal-font);font-size:12px;line-height:1.8}
 .empty strong{font-family:var(--terminal-font);letter-spacing:.04em}
 @media(max-width:700px){.bubble{max-width:100%;font-size:12px;padding:12px}.messages{font-size:12px}}
+
+/* RZ TERMINAL MODE — intentionally replaces the rounded dashboard look. */
+:root{
+ color-scheme:dark;
+ --terminal-font:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+ --line:#21412f;--text:#c7f7d0;--muted:#78a889;--accent:#70ff9b;--bad:#ff7777;
+ --panel:#050b07;--green:#70ff9b;--cyan:#65e7ff;--amber:#ffd580;
+}
+html,body{min-height:100%;background:#020503!important}
+body{font-family:var(--terminal-font)!important;letter-spacing:0!important;color:var(--text);background:repeating-linear-gradient(0deg,#020503 0,#020503 2px,#040906 3px,#020503 4px)!important}
+body:before{opacity:.09;background-image:linear-gradient(#70ff9b12 1px,transparent 1px),linear-gradient(90deg,#70ff9b0c 1px,transparent 1px);background-size:24px 24px;mask-image:linear-gradient(#000,transparent 95%)}
+.wrap{max-width:1600px;padding:18px clamp(10px,2vw,28px) 28px}
+.head{padding:0 0 14px;margin-bottom:14px;border-bottom:1px solid #285339}
+.head:after{width:100%;background:linear-gradient(90deg,var(--green),#70ff9b12 65%,transparent);box-shadow:0 0 8px #70ff9b40}
+.logo{width:44px;height:44px;border-radius:3px;background:#06160b;border:1px solid var(--green);box-shadow:inset 0 0 18px #70ff9b15,0 0 12px #70ff9b12;color:var(--green);font:700 16px var(--terminal-font);letter-spacing:.08em}
+.head h1{font:700 clamp(18px,2vw,24px)/1.3 var(--terminal-font);letter-spacing:.02em;color:#d4ffdd}
+.head p,.eyebrow,.brand-tag,.status,.section-label,.panel h2,label,.hint,.tiny,.tool-card,.tool-note,button,input,textarea,select{font-family:var(--terminal-font)!important}
+.eyebrow{font-size:10px;letter-spacing:.16em;color:var(--green)}
+.head p{font-size:11px;color:var(--muted)}
+.brand-tag{border:1px solid #285339;border-radius:2px;background:#06130a;color:var(--green);font-size:9px;letter-spacing:.08em}
+.status{border:1px solid #285339;border-radius:2px;background:#030805;padding:7px 9px;font-size:10px;color:var(--green)}
+.dot{background:var(--green);box-shadow:0 0 7px #70ff9b}
+.layout{grid-template-columns:minmax(245px,290px) minmax(0,1fr);gap:12px}
+.panel{background:#050b07!important;border:1px solid #21412f!important;border-radius:3px!important;padding:15px;box-shadow:none!important;backdrop-filter:none!important}
+.panel h2{font-size:10px;letter-spacing:.14em;color:var(--green);font-weight:700}
+.panel:first-child:before{content:"[ SYSTEM STATUS: ONLINE ]";font:10px/1.5 var(--terminal-font);letter-spacing:.05em;color:var(--green);border-bottom:1px dashed #21412f;padding-bottom:12px}
+input,textarea,select{background:#020503!important;color:#c7f7d0!important;border:1px solid #285339!important;border-radius:2px!important;font-size:12px!important;box-shadow:none!important}
+input::placeholder,textarea::placeholder{color:#52765e!important}
+input:focus,textarea:focus,select:focus{border-color:var(--green)!important;outline:1px solid #70ff9b35!important}
+button,.secondary,.tool-card,.quickbar button{border:1px solid #326b45!important;border-radius:2px!important;background:#08150b!important;color:var(--green)!important;box-shadow:none!important;font-family:var(--terminal-font)!important;font-size:11px!important;letter-spacing:.02em}
+button:hover:not(:disabled),.tool-card:hover,.quickbar button:hover{background:#0d2414!important;border-color:var(--green)!important;box-shadow:inset 0 0 14px #70ff9b0b!important;transform:none!important}
+button:disabled{opacity:.4}
+.tool-grid{gap:6px}
+.tool-card{min-height:72px;padding:9px;gap:4px;text-align:left}
+.tool-card strong{font-size:11px;color:#c7f7d0}
+.tool-card small{font-size:9px;color:var(--muted)}
+.tool-icon{font-size:15px;color:var(--green)}
+.tool-note{background:#030805!important;border:1px dashed #21412f!important;border-radius:2px!important;color:var(--muted);font-size:10px}
+.section-label{font-size:9px;letter-spacing:.16em;color:var(--green)}
+.chat{min-height:680px;background:#020503!important;border:1px solid #326b45!important;border-radius:3px!important;padding:0;overflow:hidden;box-shadow:inset 0 0 30px #70ff9b04}
+.chathead{padding:12px 16px;background:#061009!important;border-bottom:1px solid #285339!important}
+.chathead h2{font:700 11px/1.5 var(--terminal-font)!important;letter-spacing:.13em;color:var(--green)!important}
+.chathead h2:before{content:"[●] ";color:var(--green)}
+.chathead .tiny,.chathead .live{font:10px var(--terminal-font)!important;color:var(--muted)!important}
+.messages{background:#020503!important;min-height:440px;max-height:62vh;padding:18px clamp(12px,2vw,26px);gap:0;font:12px/1.8 var(--terminal-font)!important}
+.empty{max-width:520px;margin:auto;color:var(--muted);font:12px/1.9 var(--terminal-font)!important;text-align:left}
+.empty:before{content:"RZ_KERNEL / READY";display:block;width:auto;height:auto;margin:0 0 12px;padding:0;border:0;border-radius:0;background:none;box-shadow:none;animation:none;color:var(--green);font:700 12px/1.5 var(--terminal-font);letter-spacing:.12em}
+.empty strong{font:700 12px var(--terminal-font)!important;color:#d4ffdd!important}
+.bubble{display:block!important;align-self:stretch!important;max-width:100%!important;margin:0!important;padding:10px 0 12px!important;background:transparent!important;border:0!important;border-bottom:1px dashed #193323!important;border-radius:0!important;box-shadow:none!important;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.8 var(--terminal-font)!important;letter-spacing:0!important;color:#c7f7d0!important}
+.bubble:before{display:block;margin:0 0 5px;font:700 10px/1.5 var(--terminal-font)!important;letter-spacing:.1em!important;text-transform:uppercase}
+.user{color:#a9eaff!important}
+.user:before{content:"rz@terminal:~$ INPUT";color:var(--cyan)!important}
+.assistant{color:#c7f7d0!important}
+.assistant:before{content:"RZ_AGENT :: OUTPUT";color:var(--green)!important}
+.error{align-self:stretch!important;max-width:100%!important;margin:8px 0!important;padding:10px!important;border:1px solid #713b3b!important;border-radius:2px!important;background:#160707!important;color:#ffaaaa!important;font:11px/1.7 var(--terminal-font)!important}
+.composer{position:relative;padding:14px 16px 16px!important;background:#040906!important;border-top:1px solid #285339!important}
+.composer:before{content:"root@rz-agent:~$";display:block;margin:0 0 9px;color:var(--green);font:700 11px/1.5 var(--terminal-font);letter-spacing:.04em}
+.compose-row{align-items:stretch;gap:8px}
+.compose-row textarea{min-height:56px!important;border-radius:2px!important;background:#010302!important;font:12px/1.8 var(--terminal-font)!important;caret-color:var(--green)}
+.compose-row button{min-width:88px;border-radius:2px!important}
+.voice-row{gap:6px}
+.voice-row button,.voice-row select,.quickbar button{font:10px var(--terminal-font)!important;border-radius:2px!important}
+.voice-row label{font:10px var(--terminal-font)!important;color:var(--muted)}
+.quickbar{gap:5px}
+.quickbar button{padding:6px 8px!important}
+.link{color:var(--cyan)!important;text-decoration:underline}
+hr{border-top:1px dashed #21412f!important}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+@media(max-width:700px){.wrap{padding:12px 8px 20px}.head{gap:9px;padding-bottom:12px}.logo{width:38px;height:38px}.head h1{font-size:16px}.layout{grid-template-columns:minmax(0,1fr);gap:9px}.panel{padding:12px}.chat{min-height:540px}.messages{max-height:none;min-height:300px;padding:12px}.bubble{max-width:100%!important;font-size:11px!important}.composer{padding:12px!important}.status{display:none}.tool-card{min-height:64px}}
+
 </style></head><body><main class="wrap"><header class="head"><div class="logo">RZ</div><div><div class="eyebrow">PERSONAL INTELLIGENCE SYSTEM</div><h1>RZ Agent <span class="brand-tag">JARVIS INTERFACE</span></h1><p>Your command center · private by design</p></div><div class="status"><span class="dot"></span><span id="status">API page loaded</span></div></header>
 <div class="layout"><aside class="panel"><h2>ACCOUNT / CONNECT</h2><div id="accountFields" hidden><p class="hint">Create an independent RZ Agent account or sign in. Passwords are hashed on the server.</p><label for="accountEmail">Email</label><input id="accountEmail" type="email" autocomplete="email" placeholder="you@example.com"><label for="accountPassword">Password (12+ characters)</label><input id="accountPassword" type="password" autocomplete="current-password" minlength="12" maxlength="256" placeholder="At least 12 characters"><button id="loginAccount" class="secondary full" type="button">Sign in</button><button id="registerAccount" class="secondary full" type="button">Create account</button><button id="logoutAccount" class="secondary full" type="button" hidden>Sign out</button></div><div id="apiKeyFields"><p class="hint">Local mode: paste the RZ_API_KEY value from your .env file. The key stays in this page memory only.</p><label for="apiKey">RZ API key</label><input id="apiKey" type="password" autocomplete="off" placeholder="Paste API key"><button id="toggleKey" class="secondary full" type="button">Show / hide key</button><button id="check" class="secondary full" type="button">Test connection</button></div><p class="hint" id="connection">Checking authentication mode…</p><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h2>SESSION</h2><p class="hint">Messages use a temporary session for conversation context.</p><button id="newChat" class="secondary full" type="button">New conversation</button><p class="tiny">API docs: <a class="link" href="/docs">/docs</a> · MCP: <a class="link" href="/mcp">/mcp</a> · Health: <a class="link" href="/health">/health</a></p>
 <div class="section-label">QUANTUM TOOLKIT</div>
