@@ -495,6 +495,7 @@ def test_local_terminal_bridge_returns_approved_result_to_waiting_job(app, monke
     event = threading.Event()
     job = {
         "id": job_id, "command": "pwd", "workspace": "dev-terminal",
+        "owner_id": "local", "approval": "approved", "status": "queued",
         "event": event, "result": None, "created": app.time.time()
     }
     with app._LOCAL_TERMINAL_LOCK:
@@ -533,7 +534,7 @@ def test_local_terminal_tool_loop_uses_real_tool_result_and_never_executes_direc
         assert any(m.get("role") == "tool" and "actual local output" in m.get("content", "") for m in messages)
         return {"choices": [{"message": {"content": "The local command returned actual local output."}}]}
     monkeypatch.setattr(app, "_call_openrouter", fake_openrouter)
-    monkeypatch.setattr(app, "_request_local_terminal_command", lambda command, workspace: {
+    monkeypatch.setattr(app, "_request_local_terminal_command", lambda command, workspace, owner_id="local": {
         "status": "completed", "output": "actual local output"
     })
     result = app._complete_with_local_terminal_tools(
@@ -542,3 +543,74 @@ def test_local_terminal_tool_loop_uses_real_tool_result_and_never_executes_direc
     assert result["choices"][0]["message"]["content"].startswith("The local command")
     assert calls[0]["tool_choice"] == "required"
     assert calls[0]["tools"][0]["function"]["name"] == "mia_request_local_command"
+
+
+def test_local_terminal_pending_approval_is_user_scoped_and_enqueues_only_after_approval(app, monkeypatch):
+    from fastapi.testclient import TestClient
+    import threading
+    client = TestClient(app.app)
+    monkeypatch.setattr(app, "MIA_TERMINAL_BRIDGE_TOKEN", "bridge-test-secret")
+    job_id = "b" * 32
+    event = threading.Event()
+    job = {
+        "id": job_id, "command": "pwd", "workspace": "dev-terminal",
+        "owner_id": "local", "approval": "pending", "status": "pending_approval",
+        "event": event, "result": None, "created": app.time.time()
+    }
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS[job_id] = job
+    assert client.get("/v1/local-terminal/pending").status_code == 401
+    pending = client.get("/v1/local-terminal/pending", headers={"X-API-Key": "test-key"})
+    assert pending.status_code == 200
+    assert pending.json()["jobs"] == [{"id": job_id, "command": "pwd", "workspace": "dev-terminal", "created": job["created"]}]
+    assert app._LOCAL_TERMINAL_QUEUE.empty()
+    decision = client.post(f"/v1/local-terminal/decision/{job_id}", headers={"X-API-Key": "test-key"}, json={"decision": "approve"})
+    assert decision.status_code == 200
+    assert job["approval"] == "approved"
+    next_job = client.get("/v1/local-terminal/next", headers={"X-Bridge-Token": "bridge-test-secret"})
+    assert next_job.status_code == 200
+    assert next_job.json()["job"] == {"id": job_id, "command": "pwd", "workspace": "dev-terminal"}
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS.pop(job_id, None)
+
+
+def test_local_terminal_denial_wakes_waiting_chat_without_queueing(app):
+    from fastapi.testclient import TestClient
+    import threading
+    client = TestClient(app.app)
+    job_id = "c" * 32
+    event = threading.Event()
+    job = {
+        "id": job_id, "command": "pwd", "workspace": "dev-terminal",
+        "owner_id": "local", "approval": "pending", "status": "pending_approval",
+        "event": event, "result": None, "created": app.time.time()
+    }
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS[job_id] = job
+    response = client.post(f"/v1/local-terminal/decision/{job_id}", headers={"X-API-Key": "test-key"}, json={"decision": "deny"})
+    assert response.status_code == 200
+    assert event.is_set()
+    assert job["result"]["status"] == "denied"
+    assert app._LOCAL_TERMINAL_QUEUE.empty()
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS.pop(job_id, None)
+
+
+def test_local_terminal_decision_cannot_approve_another_users_job(app):
+    from fastapi.testclient import TestClient
+    import threading
+    client = TestClient(app.app)
+    job_id = "d" * 32
+    job = {
+        "id": job_id, "command": "pwd", "workspace": "dev-terminal",
+        "owner_id": "another-user", "approval": "pending", "status": "pending_approval",
+        "event": threading.Event(), "result": None, "created": app.time.time()
+    }
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS[job_id] = job
+    response = client.post(f"/v1/local-terminal/decision/{job_id}", headers={"X-API-Key": "test-key"}, json={"decision": "approve"})
+    assert response.status_code == 404
+    assert job["approval"] == "pending"
+    assert app._LOCAL_TERMINAL_QUEUE.empty()
+    with app._LOCAL_TERMINAL_LOCK:
+        app._LOCAL_TERMINAL_JOBS.pop(job_id, None)
