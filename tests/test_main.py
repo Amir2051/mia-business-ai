@@ -795,3 +795,10 @@ def test_ollama_fallback_can_recover_from_empty_openrouter_reply(app, monkeypatc
     resp = app._complete_message("s", "hello", "ollama-empty-test", None, None, 80)
     assert resp.provider == "ollama"
     assert resp.reply == "Recovered locally."
+
+
+def test_mia_agent_tool_router_is_opt_in(app):
+    assert app._should_use_mia_agent_tools("Act as an agent and research and create a plan")
+    assert not app._should_use_mia_agent_tools("Hi MIA, how are you?")
+    names = {item["function"]["name"] for item in app.MIA_AGENT_TOOLS}
+    assert {"mia_web_search", "mia_open_page", "mia_memory_list", "mia_memory_save", "mia_task_create", "mia_read_document", "mia_review_code", "mia_github_read", "mia_request_local_command"} <= names

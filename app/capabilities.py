@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import base64
 import io
+import ipaddress
+import socket
 import zipfile
 import xml.etree.ElementTree as ET
 import os
@@ -18,7 +20,7 @@ import uuid
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 MAX_QUERY = 500
@@ -180,6 +182,76 @@ def web_research(query: str, limit: int = 5) -> dict:
             errors.append(engine + " is unreachable")
     detail = "; ".join(errors[-3:])
     raise RuntimeError("Web search could not retrieve usable results from available providers. " + detail + ". Configure BRAVE_SEARCH_API_KEY for authenticated, more reliable search.")
+
+
+class _PageTextParser(HTMLParser):
+    """Extract bounded visible text while ignoring active or hidden page content."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip_depth = 0
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "noscript", "svg", "iframe", "form"}:
+            self.skip_depth += 1
+        elif tag in {"p", "div", "main", "article", "section", "li", "h1", "h2", "h3", "br"} and not self.skip_depth:
+            self.parts.append("\n")
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "noscript", "svg", "iframe", "form"} and self.skip_depth:
+            self.skip_depth -= 1
+        elif tag in {"p", "div", "main", "article", "section", "li", "h1", "h2", "h3"} and not self.skip_depth:
+            self.parts.append("\n")
+    def handle_data(self, data):
+        if not self.skip_depth and data.strip():
+            self.parts.append(data.strip())
+
+
+def web_open_page(url: str) -> dict:
+    """Fetch a public HTTPS page without following redirects or allowing private hosts."""
+    from urllib.error import HTTPError, URLError
+    from urllib.request import HTTPRedirectHandler, build_opener
+    if not isinstance(url, str) or len(url) > 2000:
+        raise ValueError("url must be a valid HTTPS URL under 2000 characters")
+    parsed = urlparse(url.strip())
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Only public HTTPS URLs without embedded credentials are allowed")
+    host = parsed.hostname.lower().rstrip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith((".local", ".internal", ".localhost")):
+        raise ValueError("Local and internal hosts are not allowed")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+    except OSError:
+        raise RuntimeError("Page host could not be resolved") from None
+    if not addresses:
+        raise RuntimeError("Page host did not resolve")
+    for address in addresses:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+        if not ip.is_global:
+            raise ValueError("Private, reserved, and non-public addresses are not allowed")
+    class _NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    req = Request(url.strip(), headers={"User-Agent":"MIA-RZ/1.0 (public page text reader)","Accept":"text/html,text/plain;q=0.9","Accept-Language":"en-US,en;q=0.8"}, method="GET")
+    try:
+        with build_opener(_NoRedirect).open(req, timeout=10) as response:
+            content_type = response.headers.get("Content-Type", "").lower()
+            raw = response.read(500_001)
+            status = response.status
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise RuntimeError("Page redirected; open the destination URL directly after reviewing it") from None
+        raise RuntimeError(f"Page request returned HTTP {exc.code}") from None
+    except (URLError, TimeoutError):
+        raise RuntimeError("Page could not be fetched") from None
+    if len(raw) > 500_000:
+        raise ValueError("Page exceeded the 500 KB read limit")
+    if not ("text/html" in content_type or "text/plain" in content_type or "application/xhtml+xml" in content_type):
+        raise ValueError("Only HTML and plain-text pages are supported")
+    text = raw.decode("utf-8", "replace")
+    if "html" in content_type:
+        parser = _PageTextParser()
+        parser.feed(text)
+        text = " ".join(" ".join(parser.parts).split())
+    return {"url": url.strip(), "status": status, "content_type": content_type, "text": text[:18000], "truncated": len(text) > 18000}
 
 def _db():
     """Persistent Postgres when DATABASE_URL exists; local SQLite for development."""
