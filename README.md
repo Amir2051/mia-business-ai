@@ -23,7 +23,7 @@ Edit `.env` and set `RZ_API_KEY` and `OPENROUTER_API_KEY`. Keep `.env` private; 
 - Interactive API docs: `http://127.0.0.1:8788/docs`
 - Chat: `POST http://127.0.0.1:8788/v1/chat` with JSON `{"message":"Hello"}` and an `X-Api-Key` header matching `RZ_API_KEY`.
 
-The chat request defaults to `openai/gpt-oss-20b` and sends OpenRouter provider preferences with Zero Data Retention enabled and provider fallbacks disabled. Provider-side data handling remains subject to OpenRouter's terms and the selected provider's policies.
+The hosted default is `nvidia/nemotron-3.5-lightning:free`. OpenRouter routing privacy is controlled by `OPENROUTER_ZDR` (default `false` for the current testing configuration) and provider failover by `OPENROUTER_ALLOW_FALLBACKS` (default `true`). If ZDR is disabled, prompts may be processed under OpenRouter and the selected provider’s standard data policies; check those policies before using sensitive data.
 
 The service binds to loopback in the example command so it is not exposed to the network by default.
 
@@ -32,21 +32,13 @@ The service binds to loopback in the example command so it is not exposed to the
 
 The hosted default remains `OPENROUTER_MODEL`. You can optionally set
 `OPENROUTER_CODING_MODEL` and/or `OPENROUTER_ANALYSIS_MODEL` to model IDs that
-you have verified are eligible under your OpenRouter ZDR policy. When configured,
+you have verified are available under your OpenRouter account’s allowed-provider and privacy settings. When configured,
 simple keyword-based routing selects those models for coding/debugging or
 analysis/research requests. An explicit `model` in a chat request takes
 precedence. If either optional variable is empty, requests in that category
 continue to use the default model.
 
-Every OpenRouter request continues to send `provider.zdr: true` and
-`allow_fallbacks: false`; routing does not weaken those privacy controls.
-Do not set either optional model until its available endpoint has been checked
-against the account's provider allowlist and ZDR requirements.
-
-When an OpenRouter key is configured, the app will not fall back to Hermes after
-an OpenRouter error, because Hermes' endpoint has not been verified for this
-ZDR requirement. It returns a clear failure instead. Hermes can be used as the
-primary provider only when OpenRouter is not configured.
+OpenRouter requests read `provider.zdr` and `provider.allow_fallbacks` from the corresponding environment variables. Set `OPENROUTER_ZDR=true` only if the selected model has an available endpoint that meets your ZDR requirement. Keep model IDs compatible with the provider allowlist configured in your OpenRouter account. The app does not silently switch to Hermes after an OpenRouter failure; it returns a clear error instead.
 
 
 ## Runtime capabilities and session cleanup
@@ -121,7 +113,7 @@ Example MCP tool call after authentication:
 - `GET/POST/DELETE /v1/memory` list, save, and delete explicitly saved user memories. In account-auth mode, records are scoped to the authenticated account and use the configured PostgreSQL database. Local API-key mode stores memory in SQLite at `RZ_LOCAL_DATA_PATH` or `~/.rz-ai-agent/capabilities.sqlite3`.
 - `GET/POST /v1/tasks` and `PATCH /v1/tasks/{task_id}/steps/{step_index}` persist bounded task plans and track step status. These are task tracking primitives, not an unrestricted background agent or shell executor.
 
-All endpoints require the existing API-key or account authentication. No arbitrary shell execution or write-capable GitHub tools are added. OpenRouter calls still request ZDR and disable provider fallbacks. The existing conversation history remains in memory; explicit saved memory and task records are stored separately.
+All endpoints require the existing API-key or account authentication. No arbitrary shell execution or write-capable GitHub tools are added. OpenRouter routing preferences are configured with `OPENROUTER_ZDR` and `OPENROUTER_ALLOW_FALLBACKS`. The existing conversation history remains in memory; explicit saved memory and task records are stored separately.
 
 
 ## MCP access for external clients

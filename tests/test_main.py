@@ -39,6 +39,31 @@ def test_placeholder_openrouter_skips_to_502(app):
         raise AssertionError("expected a 502 when no provider is usable")
 
 
+def test_openrouter_provider_preferences_are_configurable(app, monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self):
+            return b'{"choices":[{"message":{"content":"hello"}}]}'
+
+    def fake_urlopen(req, timeout=45):
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(app, "OPENROUTER_ZDR", False)
+    monkeypatch.setattr(app, "OPENROUTER_ALLOW_FALLBACKS", True)
+    monkeypatch.setattr(app, "urlopen", fake_urlopen)
+    result = app._call_openrouter([{"role": "user", "content": "hello"}], "nvidia/nemotron-3.5-lightning:free", None, 100)
+
+    assert result["choices"][0]["message"]["content"] == "hello"
+    assert captured["payload"]["provider"] == {"zdr": False, "allow_fallbacks": True}
+
+
 def test_openrouter_conversation_memory(app, monkeypatch):
     calls = []
 

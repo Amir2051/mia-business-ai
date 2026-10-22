@@ -118,7 +118,9 @@ def auth_mode():
 
 # ---------------------------------------------------------------- OpenRouter (primary)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-20b").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free").strip()
+OPENROUTER_ZDR = os.getenv("OPENROUTER_ZDR", "false").strip().lower() in {"1", "true", "yes", "on"}
+OPENROUTER_ALLOW_FALLBACKS = os.getenv("OPENROUTER_ALLOW_FALLBACKS", "true").strip().lower() in {"1", "true", "yes", "on"}
 OPENROUTER_CODING_MODEL = os.getenv("OPENROUTER_CODING_MODEL", "").strip()
 OPENROUTER_ANALYSIS_MODEL = os.getenv("OPENROUTER_ANALYSIS_MODEL", "").strip()
 
@@ -403,7 +405,7 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, 
     payload: dict = {
         "model": model or OPENROUTER_MODEL,
         "messages": messages,
-        "provider": {"zdr": True, "allow_fallbacks": False},
+        "provider": {"zdr": OPENROUTER_ZDR, "allow_fallbacks": OPENROUTER_ALLOW_FALLBACKS},
     }
     if temperature is not None:
         payload["temperature"] = temperature

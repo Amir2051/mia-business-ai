@@ -15,7 +15,15 @@ services:
       - key: INWORLD_TTS_MODEL
         value: inworld-tts-2
       - key: OPENROUTER_MODEL
-        value: openai/gpt-oss-20b
+        value: nvidia/nemotron-3.5-lightning:free
+      - key: OPENROUTER_CODING_MODEL
+        value: nvidia/nemotron-3.5-lightning:free
+      - key: OPENROUTER_ANALYSIS_MODEL
+        value: nvidia/nemotron-3.5-lightning:free
+      - key: OPENROUTER_ZDR
+        value: "false"
+      - key: OPENROUTER_ALLOW_FALLBACKS
+        value: "true"
       - key: DATABASE_URL
         sync: false
       - key: APP_ORIGIN
