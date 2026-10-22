@@ -19,6 +19,13 @@ class Credentials(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=256)
 
+class ApiTokenCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    scopes: list[str] = Field(default_factory=lambda: ["mcp:read", "mcp:call"])
+    expires_in_days: int | None = Field(default=90, ge=1, le=365)
+
+ALLOWED_API_TOKEN_SCOPES = {"mcp:read", "mcp:call"}
+
 def _db():
     if not DATABASE_URL:
         raise HTTPException(status_code=503, detail="Database authentication is not configured")
@@ -119,6 +126,79 @@ def logout(request: Request, response: Response):
             conn.execute("DELETE FROM auth_sessions WHERE token_hash = %s", (_token_hash(token),))
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=COOKIE_SECURE, samesite="lax")
     return {"authenticated": False}
+
+@router.post("/tokens")
+def create_api_token(payload: ApiTokenCreate, user: dict = Depends(get_current_user)):
+    name = payload.name.strip()
+    scopes = sorted(set(payload.scopes))
+    if not name:
+        raise HTTPException(status_code=422, detail="Token name cannot be blank")
+    if not scopes or not set(scopes).issubset(ALLOWED_API_TOKEN_SCOPES):
+        raise HTTPException(status_code=422, detail="Allowed scopes: mcp:read, mcp:call")
+    raw_token = "rzat_" + secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.expires_in_days)
+                  if payload.expires_in_days is not None else None)
+    with _db() as conn:
+        row = conn.execute(
+            """INSERT INTO auth_api_tokens (user_id, name, token_hash, scopes, expires_at)
+               VALUES (%s, %s, %s, %s, %s)
+               RETURNING id::text, name, scopes, created_at, expires_at""",
+            (user["id"], name, _token_hash(raw_token), scopes, expires_at),
+        ).fetchone()
+    return {"token": raw_token, "token_id": row[0], "name": row[1],
+            "scopes": list(row[2]), "created_at": row[3], "expires_at": row[4],
+            "warning": "Copy this token now. It cannot be displayed again."}
+
+@router.get("/tokens")
+def list_api_tokens(user: dict = Depends(get_current_user)):
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT id::text, name, scopes, created_at, last_used_at, expires_at, revoked_at
+               FROM auth_api_tokens WHERE user_id = %s ORDER BY created_at DESC""",
+            (user["id"],),
+        ).fetchall()
+    return {"tokens": [{"id": r[0], "name": r[1], "scopes": list(r[2]),
+                         "created_at": r[3], "last_used_at": r[4], "expires_at": r[5],
+                         "revoked_at": r[6]} for r in rows]}
+
+@router.delete("/tokens/{token_id}")
+def revoke_api_token(token_id: str, user: dict = Depends(get_current_user)):
+    import uuid
+    try:
+        token_uuid = str(uuid.UUID(token_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=404, detail="Token not found") from None
+    with _db() as conn:
+        row = conn.execute(
+            """UPDATE auth_api_tokens SET revoked_at = now()
+               WHERE id = %s AND user_id = %s AND revoked_at IS NULL RETURNING id::text""",
+            (token_uuid, user["id"]),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return {"revoked": True, "token_id": row[0]}
+
+def get_user_from_bearer(authorization: str, required_scope: str | None = None) -> dict:
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.startswith("rzat_") or len(token) > 200:
+        raise HTTPException(status_code=401, detail="Valid RZ Agent bearer token required")
+    with _db() as conn:
+        row = conn.execute(
+            """SELECT u.id::text, u.email, t.scopes
+               FROM auth_api_tokens t JOIN auth_users u ON u.id = t.user_id
+               WHERE t.token_hash = %s AND t.revoked_at IS NULL
+                 AND (t.expires_at IS NULL OR t.expires_at > now())
+                 AND u.disabled_at IS NULL""",
+            (_token_hash(token),),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="API token is invalid, expired, or revoked")
+        scopes = set(row[2] or [])
+        if required_scope and required_scope not in scopes:
+            raise HTTPException(status_code=403, detail=f"Token lacks required scope: {required_scope}")
+        conn.execute("UPDATE auth_api_tokens SET last_used_at = now() WHERE token_hash = %s",
+                     (_token_hash(token),))
+    return {"id": row[0], "email": row[1], "scopes": sorted(scopes), "auth_type": "api_token"}
 
 @router.get("/me")
 def me(user: dict = Depends(get_current_user)):

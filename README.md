@@ -122,3 +122,8 @@ Example MCP tool call after authentication:
 - `GET/POST /v1/tasks` and `PATCH /v1/tasks/{task_id}/steps/{step_index}` persist bounded task plans and track step status. These are task tracking primitives, not an unrestricted background agent or shell executor.
 
 All endpoints require the existing API-key or account authentication. No arbitrary shell execution or write-capable GitHub tools are added. OpenRouter calls still request ZDR and disable provider fallbacks. The existing conversation history remains in memory; explicit saved memory and task records are stored separately.
+
+
+## MCP access for external clients
+
+The deployed service supports authenticated MCP at `/mcp`. For external MCP clients, create a scoped bearer token from the signed-in account endpoints documented in `AUTHENTICATION.md`. Apply `database/migrations/002_api_tokens.sql` after the existing auth migration. Tokens are revocable and stored hashed. Available MCP tools include runtime status, conversations/chat, and read-only GitHub repository/issue/PR/file operations; the approved REST capability endpoints cover research, memory, tasks, document analysis, code review, and image generation. There is no arbitrary shell execution or unrestricted filesystem tool.
