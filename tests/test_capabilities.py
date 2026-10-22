@@ -8,7 +8,8 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv('RZ_API_KEY','test-key')
     monkeypatch.setenv('OPENROUTER_API_KEY','test-provider-key')
     monkeypatch.setenv('RZ_LOCAL_DATA_PATH',str(tmp_path/'cap.sqlite3'))
-    monkeypatch.delenv('DATABASE_URL',raising=False)
+    # Empty-but-present prevents python-dotenv from loading a developer's private .env DB URL.
+    monkeypatch.setenv('DATABASE_URL','')
     monkeypatch.delenv('IMAGE_GENERATION_ENDPOINT',raising=False)
     monkeypatch.delenv('IMAGE_GENERATION_API_KEY',raising=False)
     monkeypatch.delenv('IMAGE_GENERATION_MODEL',raising=False)

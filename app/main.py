@@ -53,6 +53,37 @@ def require_app_user(request: Request, x_api_key: str = Header(default="")):
     return {"id": "local", "email": "local@rz-agent"}
 
 
+def require_mcp_user(request: Request, authorization: str = Header(default=""), x_api_key: str = Header(default="")):
+    """Authenticate MCP clients using scoped bearer tokens; keep browser sessions intact."""
+    if DATABASE_AUTH_ENABLED:
+        if authorization:
+            from app.auth import get_user_from_bearer
+            return get_user_from_bearer(authorization)
+        user = _get_database_user(request)
+        return {**user, "scopes": ["mcp:read", "mcp:call"], "auth_type": "session"}
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Bearer token required")
+        require_api_key(token)
+    else:
+        require_api_key(x_api_key)
+    return {"id": "local", "email": "local@rz-agent", "scopes": ["mcp:read", "mcp:call"], "auth_type": "api_key"}
+
+
+def require_tool_scope(scope: str):
+    def dependency(request: Request, authorization: str = Header(default=""), x_api_key: str = Header(default="")):
+        user = require_mcp_user(request, authorization, x_api_key)
+        if scope not in user.get("scopes", []):
+            raise HTTPException(status_code=403, detail=f"Token lacks required scope: {scope}")
+        return user
+    return dependency
+
+
+def require_tool_call_user(request: Request, authorization: str = Header(default=""), x_api_key: str = Header(default="")):
+    return require_tool_scope("mcp:call")(request, authorization, x_api_key)
+
+
 @app.get("/v1/auth/mode")
 def auth_mode():
     return {"mode": "account" if DATABASE_AUTH_ENABLED else "api_key"}
@@ -847,7 +878,7 @@ def _mcp_text_result(value: dict, is_error: bool = False) -> dict:
 
 
 @app.post("/mcp")
-async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_app_user)):
+async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_mcp_user)):
     """Minimal authenticated MCP JSON-RPC endpoint for Streamable HTTP clients."""
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
         return JSONResponse(status_code=400, content={
@@ -858,6 +889,9 @@ async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_app_u
     method = payload.get("method")
     request_id = payload.get("id")
     params = payload.get("params") or {}
+    required_scope = "mcp:call" if method == "tools/call" else "mcp:read"
+    if required_scope not in current_user.get("scopes", []):
+        raise HTTPException(status_code=403, detail=f"Token lacks required scope: {required_scope}")
     if not isinstance(params, dict):
         params = {}
 
@@ -945,13 +979,13 @@ async def mcp_endpoint(payload: dict, current_user: dict = Depends(require_app_u
 
 # ------------------------------------------------------ approved capabilities
 @app.get("/v1/tools")
-def list_approved_tools(current_user: dict = Depends(require_app_user)):
+def list_approved_tools(current_user: dict = Depends(require_tool_scope("mcp:read"))):
     """List server-supported capabilities and their safety boundaries."""
     return {"status": "ok", "capabilities": cap_services.capabilities()}
 
 
 @app.post("/v1/research")
-def research_web(payload: dict, current_user: dict = Depends(require_app_user)):
+def research_web(payload: dict, current_user: dict = Depends(require_tool_call_user)):
     try:
         return {"status": "ok", **cap_services.web_research(payload.get("query"), payload.get("limit", 5))}
     except (ValueError, RuntimeError) as exc:
@@ -959,7 +993,7 @@ def research_web(payload: dict, current_user: dict = Depends(require_app_user)):
 
 
 @app.get("/v1/memory")
-def memory_list(limit: int = 20, current_user: dict = Depends(require_app_user)):
+def memory_list(limit: int = 20, current_user: dict = Depends(require_tool_scope("mcp:read"))):
     try:
         return {"status": "ok", **cap_services.list_memories(str(current_user["id"]), limit)}
     except ValueError as exc:
@@ -967,7 +1001,7 @@ def memory_list(limit: int = 20, current_user: dict = Depends(require_app_user))
 
 
 @app.post("/v1/memory")
-def memory_save(payload: dict, current_user: dict = Depends(require_app_user)):
+def memory_save(payload: dict, current_user: dict = Depends(require_tool_call_user)):
     try:
         return {"status": "ok", "memory": cap_services.save_memory(str(current_user["id"]), payload.get("content"))}
     except ValueError as exc:
@@ -975,7 +1009,7 @@ def memory_save(payload: dict, current_user: dict = Depends(require_app_user)):
 
 
 @app.delete("/v1/memory/{memory_id}")
-def memory_delete(memory_id: str, current_user: dict = Depends(require_app_user)):
+def memory_delete(memory_id: str, current_user: dict = Depends(require_tool_call_user)):
     if not re.fullmatch(r"[a-f0-9]{32}", memory_id):
         raise HTTPException(status_code=400, detail="Invalid memory id")
     if not cap_services.delete_memory(str(current_user["id"]), memory_id):
@@ -984,7 +1018,7 @@ def memory_delete(memory_id: str, current_user: dict = Depends(require_app_user)
 
 
 @app.get("/v1/tasks")
-def tasks_list(limit: int = 20, current_user: dict = Depends(require_app_user)):
+def tasks_list(limit: int = 20, current_user: dict = Depends(require_tool_scope("mcp:read"))):
     try:
         return {"status": "ok", **cap_services.list_tasks(str(current_user["id"]), limit)}
     except ValueError as exc:
@@ -992,7 +1026,7 @@ def tasks_list(limit: int = 20, current_user: dict = Depends(require_app_user)):
 
 
 @app.post("/v1/tasks")
-def task_create(payload: dict, current_user: dict = Depends(require_app_user)):
+def task_create(payload: dict, current_user: dict = Depends(require_tool_call_user)):
     try:
         existing = cap_services.list_tasks(str(current_user["id"]), 50)
         if existing["count"] >= cap_services.MAX_TASKS_PER_USER:
@@ -1004,7 +1038,7 @@ def task_create(payload: dict, current_user: dict = Depends(require_app_user)):
 
 
 @app.patch("/v1/tasks/{task_id}/steps/{step_index}")
-def task_update_step(task_id: str, step_index: int, payload: dict, current_user: dict = Depends(require_app_user)):
+def task_update_step(task_id: str, step_index: int, payload: dict, current_user: dict = Depends(require_tool_call_user)):
     if not re.fullmatch(r"[a-f0-9]{32}", task_id):
         raise HTTPException(status_code=400, detail="Invalid task id")
     try:
@@ -1019,7 +1053,7 @@ def task_update_step(task_id: str, step_index: int, payload: dict, current_user:
 
 
 @app.post("/v1/documents/analyze")
-def analyze_document(payload: dict, current_user: dict = Depends(require_app_user)):
+def analyze_document(payload: dict, current_user: dict = Depends(require_tool_call_user)):
     try:
         document = cap_services.extract_document(payload.get("filename"), payload.get("content_base64"))
     except ValueError as exc:
@@ -1037,7 +1071,7 @@ def analyze_document(payload: dict, current_user: dict = Depends(require_app_use
     return {"status": "ok", "filename": document["filename"], "characters": document["characters"], "truncated": document["truncated"], "provider": response.provider, "model": response.model, "analysis": response.reply}
 
 @app.post("/v1/code/review")
-def code_review(payload: dict, current_user: dict = Depends(require_app_user)):
+def code_review(payload: dict, current_user: dict = Depends(require_tool_call_user)):
     """Analyze supplied code safely; this endpoint never executes user code."""
     code = payload.get("code")
     question = payload.get("question", "Review this code for correctness, security, and maintainability.")
@@ -1056,7 +1090,7 @@ def code_review(payload: dict, current_user: dict = Depends(require_app_user)):
     return {"status": "ok", "provider": response.provider, "model": response.model, "review": response.reply, "execution_performed": False}
 
 @app.post("/v1/images/generations")
-def generate_image(payload: dict, current_user: dict = Depends(require_app_user)):
+def generate_image(payload: dict, current_user: dict = Depends(require_tool_call_user)):
     """Generate a real image through OpenRouter's unified Image API."""
     endpoint = os.getenv("IMAGE_GENERATION_ENDPOINT", "https://openrouter.ai/api/v1/images").strip()
     image_key = os.getenv("IMAGE_GENERATION_API_KEY", "").strip() or OPENROUTER_API_KEY
@@ -1104,7 +1138,7 @@ def generate_image(payload: dict, current_user: dict = Depends(require_app_user)
         raise HTTPException(status_code=502, detail=f"Image provider response invalid: {str(exc)[:180]}") from None
 
 @app.get("/v1/capabilities")
-def capabilities(_current_user: dict = Depends(require_app_user)):
+def capabilities(_current_user: dict = Depends(require_tool_scope("mcp:read"))):
     """Expose safe runtime capabilities without returning credentials or prompts."""
     openrouter_configured = bool(
         OPENROUTER_API_KEY and not _is_placeholder(OPENROUTER_API_KEY)

@@ -9,13 +9,16 @@ from unittest import mock  # noqa: E402
 
 
 @pytest.fixture()
-def app():
+def app(monkeypatch):
+    # Force local API-key mode even if the developer has a private .env file.
+    monkeypatch.setenv("DATABASE_URL", "")
     os.environ["RZ_API_KEY"] = "test-key"
     os.environ["OPENROUTER_API_KEY"] = "real"
     os.environ["HERMES_API_KEY"] = "hermes-secret"
     os.environ["HERMES_MODEL"] = "upstage/solar-mini4"
     os.environ["HERMES_ENABLED"] = "1"
     sys.modules.pop("app.main", None)
+    sys.modules.pop("app.auth", None)
     import app.main as m  # noqa: F401
 
     yield m
@@ -350,3 +353,96 @@ def test_github_tool_loop_rejects_unlisted_tool(app, monkeypatch):
     response = type("R", (), {"reply": app._extract_reply(result)})()
     assert response.reply == "I only have read-only GitHub access."
     assert calls == 2
+
+
+def test_scoped_bearer_token_auth_for_mcp_and_individual_tool_routes(app, monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.auth as auth
+
+    monkeypatch.setattr(app, "DATABASE_AUTH_ENABLED", True)
+    monkeypatch.setattr(app, "_get_database_user", lambda request: {"id": "session-user", "email": "session@example.com"}, raising=False)
+    def fake_bearer(authorization, required_scope=None):
+        token = authorization.partition(" ")[2]
+        if token == "read-token":
+            return {"id": "user-read", "email": "read@example.com", "scopes": ["mcp:read"], "auth_type": "api_token"}
+        if token == "call-token":
+            return {"id": "user-call", "email": "call@example.com", "scopes": ["mcp:read", "mcp:call"], "auth_type": "api_token"}
+        raise HTTPException(status_code=401, detail="API token is invalid, expired, or revoked")
+    monkeypatch.setattr(auth, "get_user_from_bearer", fake_bearer)
+    monkeypatch.setattr(app.cap_services, "list_memories", lambda user_id, limit: {"memories": [], "count": 0, "owner": user_id})
+    monkeypatch.setattr(app.cap_services, "save_memory", lambda user_id, content: {"id": "mem1", "content": content, "owner": user_id})
+    monkeypatch.setattr(app.cap_services, "web_research", lambda query, limit: {"query": query, "count": 1, "results": [{"title": "Mock result"}]})
+    client = TestClient(app.app)
+
+    read_headers = {"Authorization": "Bearer read-token"}
+    listed = client.post("/mcp", headers=read_headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert listed.status_code == 200
+    denied_call = client.post("/mcp", headers=read_headers, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "list_conversations", "arguments": {}}})
+    assert denied_call.status_code == 403
+    assert client.get("/v1/memory", headers=read_headers).status_code == 200
+    assert client.post("/v1/memory", headers=read_headers, json={"content": "blocked"}).status_code == 403
+
+    call_headers = {"Authorization": "Bearer call-token"}
+    called = client.post("/mcp", headers=call_headers, json={
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "list_conversations", "arguments": {}}})
+    assert called.status_code == 200
+    saved = client.post("/v1/memory", headers=call_headers, json={"content": "persist this"})
+    assert saved.status_code == 200
+    assert saved.json()["memory"]["owner"] == "user-call"
+    research_denied = client.post("/v1/research", headers=read_headers, json={"query": "safe test"})
+    assert research_denied.status_code == 403
+    research = client.post("/v1/research", headers=call_headers, json={"query": "safe test"})
+    assert research.status_code == 200
+    assert research.json()["results"][0]["title"] == "Mock result"
+
+
+def test_bearer_token_verification_checks_scope_and_revocation(app, monkeypatch):
+    import app.auth as auth
+
+    class FakeResult:
+        def __init__(self, row): self.row = row
+        def fetchone(self): return self.row
+    class FakeConnection:
+        def __init__(self, row): self.row = row
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, query, params=()): return FakeResult(self.row)
+
+    monkeypatch.setattr(auth, "_token_hash", lambda token: "hashed-token")
+    monkeypatch.setattr(auth, "_db", lambda: FakeConnection(("u1", "u@example.com", ["mcp:read"])))
+    with pytest.raises(HTTPException) as denied:
+        auth.get_user_from_bearer("Bearer rzat_test", "mcp:call")
+    assert denied.value.status_code == 403
+
+    monkeypatch.setattr(auth, "_db", lambda: FakeConnection(None))
+    with pytest.raises(HTTPException) as invalid:
+        auth.get_user_from_bearer("Bearer rzat_test")
+    assert invalid.value.status_code == 401
+    assert "revoked" in invalid.value.detail
+
+
+def test_api_token_creation_returns_secret_once_and_stores_only_hash(app, monkeypatch):
+    import app.auth as auth
+    from datetime import datetime, timezone
+
+    class FakeResult:
+        def fetchone(self): return ("token-id", "RZ MCP", ["mcp:call", "mcp:read"], datetime.now(timezone.utc), None)
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, query, params=()):
+            assert "INSERT INTO auth_api_tokens" in query
+            assert params[2].startswith("sha256:")
+            assert params[2] != params[1]
+            return FakeResult()
+
+    import hashlib
+    monkeypatch.setattr(auth, "_db", lambda: FakeConnection())
+    monkeypatch.setattr(auth, "_token_hash", lambda token: "sha256:" + hashlib.sha256(token.encode()).hexdigest())
+    result = auth.create_api_token(auth.ApiTokenCreate(name="RZ MCP"), {"id": "u1"})
+    assert result["token"].startswith("rzat_")
+    assert result["warning"].endswith("cannot be displayed again.")
+    assert result["scopes"] == ["mcp:call", "mcp:read"]
