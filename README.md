@@ -75,9 +75,15 @@ Available tools:
 - `chat`: send a prompt through the existing configured model and provider policy.
 - `reset_conversation`: delete one of the authenticated user's active in-memory conversations.
 
-MCP does not add web search, filesystem access, shell execution, or external app integrations.
-Those should be added individually with explicit permission boundaries. The existing OpenRouter
-Zero Data Retention request and disabled provider fallbacks remain unchanged.
+MCP does not add filesystem access, shell execution, or external app integrations. Web research is exposed separately through the authenticated `/v1/research` endpoint; it uses Brave Search when `BRAVE_SEARCH_API_KEY` is configured and otherwise attempts a best-effort DuckDuckGo HTML fallback, which may be rate-limited. The existing OpenRouter Zero Data Retention request and disabled provider fallbacks remain unchanged.
+
+## Capability workflows
+
+The browser UI includes authenticated workflows for document analysis, code review, memory save/list/delete, and task-plan creation/listing/step updates. Code review analyzes submitted code and does not execute it. Document uploads are limited to 3 MB and supported text, source, CSV, DOCX, and PDF formats; extracted content is bounded before it is sent to the configured model. Task plans track steps and statuses but do not autonomously execute them.
+
+Memory and task data use PostgreSQL when `DATABASE_URL` is configured. Without it, the service falls back to local SQLite at `RZ_LOCAL_DATA_PATH` (or `~/.rz-ai-agent/capabilities.sqlite3`). Local SQLite is suitable for development but may not survive restarts or replacements on an ephemeral hosting service; use a persistent PostgreSQL database for durable hosted data. The `/v1/tools` and `/v1/capabilities` endpoints report configuration status without exposing credentials.
+
+Image generation uses OpenRouter's unified Image API (`POST https://openrouter.ai/api/v1/images`) with `OPENROUTER_API_KEY`. The default model is `bytedance-seed/seedream-4.5` (image generations are paid; OpenRouter's model catalog and endpoint pricing can change). Optionally override `IMAGE_GENERATION_ENDPOINT`, `IMAGE_GENERATION_API_KEY`, and `IMAGE_GENERATION_MODEL`; custom endpoints must use HTTPS and return the OpenRouter-style `data[0].b64_json` or an HTTPS image URL. The endpoint reports provider errors honestly and returns the model and usage cost when supplied.
 
 MCP initialize example (replace the key locally; never paste a real key into shared logs):
 
@@ -104,3 +110,15 @@ Example MCP tool call after authentication:
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"github_get_repository","arguments":{"repo":"rz-ai-agent"}}}
 ```
+
+## Capability endpoints (authenticated)
+
+- `GET /v1/tools` reports available capabilities and explicit limitations.
+- `POST /v1/research` accepts `{ "query": "...", "limit": 5 }` and returns bounded web search results. Configure `BRAVE_SEARCH_API_KEY` for reliable search; an unauthenticated DuckDuckGo HTML attempt is best-effort and returns an explicit error if blocked. Explicit prompts such as “search the web” or “research online” include retrieved snippets in chat synthesis. Search results are untrusted and should be verified at source.
+- `POST /v1/images/generations` accepts `{ "prompt": "..." }` and uses the shared `OPENROUTER_API_KEY` with `POST https://openrouter.ai/api/v1/images` by default. Default model: `bytedance-seed/seedream-4.5`; every generated image may incur a charge, so check current model pricing before use. You can override `IMAGE_GENERATION_ENDPOINT`, `IMAGE_GENERATION_API_KEY`, and `IMAGE_GENERATION_MODEL`. The UI displays the actual returned image and reports model/cost metadata when present; provider errors are not faked.
+- `POST /v1/documents/analyze` accepts `{ "filename": "notes.pdf", "content_base64": "...", "question": "Summarize this" }`. Upload limit is 3 MB; extracted text is capped at 40,000 characters. Supported formats include TXT, Markdown, source code, JSON, CSV, DOCX, and PDF. PDF extraction uses `pypdf`.
+- `POST /v1/code/review` accepts `{ "language": "python", "code": "...", "question": "Review this" }`. This analyzes supplied code but never executes it.
+- `GET/POST/DELETE /v1/memory` list, save, and delete explicitly saved user memories. In account-auth mode, records are scoped to the authenticated account and use the configured PostgreSQL database. Local API-key mode stores memory in SQLite at `RZ_LOCAL_DATA_PATH` or `~/.rz-ai-agent/capabilities.sqlite3`.
+- `GET/POST /v1/tasks` and `PATCH /v1/tasks/{task_id}/steps/{step_index}` persist bounded task plans and track step status. These are task tracking primitives, not an unrestricted background agent or shell executor.
+
+All endpoints require the existing API-key or account authentication. No arbitrary shell execution or write-capable GitHub tools are added. OpenRouter calls still request ZDR and disable provider fallbacks. The existing conversation history remains in memory; explicit saved memory and task records are stored separately.
