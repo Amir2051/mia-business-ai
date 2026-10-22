@@ -116,6 +116,11 @@ def require_tool_call_user(request: Request, authorization: str = Header(default
     return require_tool_scope("mcp:call")(request, authorization, x_api_key)
 
 
+# MIA Creator is an isolated capability module; chat/model routing and core identity stay unchanged.
+from app.creator import create_router as _create_creator_router
+app.include_router(_create_creator_router(require_app_user))
+
+
 @app.get("/v1/auth/mode")
 def auth_mode():
     return {"mode": "account" if DATABASE_AUTH_ENABLED else "api_key"}
