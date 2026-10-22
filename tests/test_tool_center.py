@@ -43,7 +43,8 @@ def test_tool_center_requires_auth_and_permissions_are_per_user(client):
 
 
 def test_document_analysis_extracts_only_supported_uploads(client, monkeypatch):
-    c, headers = client    class Response:
+    c, headers = client
+    class Response:
         reply = "Summary: a short test document."
         model = "test-model"
     monkeypatch.setattr("app.main._complete_message", lambda *args, **kwargs: Response())

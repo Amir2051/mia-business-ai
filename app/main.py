@@ -1693,3 +1693,9 @@ app.include_router(tool_center_router)
 @app.get("/tools", response_class=HTMLResponse)
 def tool_center_page():
     return (Path(__file__).parent / "tools_center.html").read_text(encoding="utf-8")
+
+from app.social_marketing import router as social_marketing_router
+app.include_router(social_marketing_router)
+
+from app.slack_channel import router as slack_channel_router
+app.include_router(slack_channel_router)
