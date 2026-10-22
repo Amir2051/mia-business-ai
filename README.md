@@ -127,3 +127,20 @@ All endpoints require the existing API-key or account authentication. No arbitra
 ## MCP access for external clients
 
 The deployed service supports authenticated MCP at `/mcp`. For external MCP clients, create a scoped bearer token from the signed-in account endpoints documented in `AUTHENTICATION.md`. Apply `database/migrations/002_api_tokens.sql` after the existing auth migration. Tokens are revocable and stored hashed. Available MCP tools include runtime status, conversations/chat, and read-only GitHub repository/issue/PR/file operations; the approved REST capability endpoints cover research, memory, tasks, document analysis, code review, and image generation. There is no arbitrary shell execution or unrestricted filesystem tool.
+
+## Slack CLI workflow (local development)
+
+MIA's MCP & Plugins page includes a Slack CLI quickstart. From this repository root:
+
+```bash
+./scripts/slack-cli-workflow.sh check
+./scripts/slack-cli-workflow.sh install  # only if missing; asks before running installer
+./scripts/slack-cli-workflow.sh login
+./scripts/slack-cli-workflow.sh create
+cd <your-new-slack-project>
+/path/to/rz-ai-agent/scripts/slack-cli-workflow.sh run
+```
+
+The helper checks for the `slack` executable, downloads the official installer to a temporary file before asking for confirmation, and delegates interactive login/project creation/running to Slack CLI. It does not collect or persist Slack credentials. Never commit `.env` files, tokens, signing secrets, or client secrets. Review app scopes and manifest before installing the app in a workspace. `slack run` runs locally and is not a production deployment.
+
+Official quickstart: https://docs.slack.dev/quickstart
