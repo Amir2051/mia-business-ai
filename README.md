@@ -27,6 +27,14 @@ The hosted default is `nvidia/nemotron-3.5-lightning:free`, with `openrouter/fre
 
 The service binds to loopback in the example command so it is not exposed to the network by default.
 
+An optional Ollama fallback can be enabled with `OLLAMA_BASE_URL` and
+`OLLAMA_MODEL` (default `qwen3:1.7b`). It uses Ollama's native `/api/chat` API
+and only runs after the primary provider fails or returns no usable text. The
+prompt is sent to the configured Ollama endpoint, not OpenRouter. A hosted
+Render service cannot reach `127.0.0.1` on a user's Kali computer; hosted use
+requires a secure, authenticated private connection. Do not expose port 11434
+publicly.
+
 
 ## Optional task-aware model routing
 

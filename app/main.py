@@ -178,6 +178,55 @@ HERMES_API_KEY = os.getenv("HERMES_API_KEY", "").strip()
 HERMES_MODEL = os.getenv("HERMES_MODEL", "upstage/solar-mini4").strip()
 HERMES_ENABLED = bool(HERMES_API_KEY or os.getenv("HERMES_DEFAULT", "0").strip().lower() in {"1", "true", "yes"})
 
+# ---------------------------------------------------------------- Local Ollama fallback
+# Disabled unless explicitly configured. Use Ollama's native API so Qwen's
+# thinking tokens cannot be mistaken for the final assistant answer.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").strip().rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:1.7b").strip() or "qwen3:1.7b"
+OLLAMA_TIMEOUT_SECONDS = max(1, min(int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "90")), 180))
+OLLAMA_ENABLED = bool(OLLAMA_BASE_URL)
+
+
+def _call_ollama(messages: list[dict], model: str, temperature, max_tokens, tools=None, tool_choice="auto") -> dict:
+    """Call a configured Ollama server and normalize its result to chat-completions shape."""
+    if not OLLAMA_ENABLED:
+        raise RuntimeError("Local Ollama fallback is disabled; set OLLAMA_BASE_URL to enable it")
+    if tools:
+        raise RuntimeError("Ollama fallback does not support this app's provider-specific tool flow")
+    payload: dict = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+    }
+    options: dict = {}
+    if temperature is not None:
+        options["temperature"] = temperature
+    if max_tokens is not None:
+        options["num_predict"] = max_tokens
+    if options:
+        payload["options"] = options
+    req = URLRequest(
+        f"{OLLAMA_BASE_URL}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    message = result.get("message") if isinstance(result, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("Ollama returned no final assistant text")
+    return {
+        "model": result.get("model", OLLAMA_MODEL),
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content.strip()}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": result.get("prompt_eval_count", 0),
+            "completion_tokens": result.get("eval_count", 0),
+        },
+    }
+
 # ---------------------------------------------------------------- GitHub read-only tools
 # Keep the integration scoped to the user's explicitly authorized GitHub owner.
 GITHUB_API_BASE = "https://api.github.com"
@@ -823,19 +872,23 @@ def _complete_message(
         OPENROUTER_API_KEY and not _is_placeholder(OPENROUTER_API_KEY)
     )
     if openrouter_configured:
-        # Privacy guard: never fail over from OpenRouter's enforced ZDR route
-        # to an external provider whose ZDR eligibility has not been verified.
+        # OpenRouter retains its configured ZDR policy; local Ollama below is
+        # a separately configured endpoint and never routes through OpenRouter.
         providers.append(("openrouter", _call_openrouter))
     elif HERMES_ENABLED:
         # Hermes may be used as the primary only when OpenRouter is not configured.
         providers.append(("hermes", _call_hermes))
+    if OLLAMA_ENABLED:
+        providers.append(("ollama", _call_ollama))
 
     result = None
     provider_model_used = None
     last_error: Exception | None = None
     for name, fn in providers:
         provider_model = (
-            (model or OPENROUTER_MODEL) if name == "openrouter" else HERMES_MODEL
+            (model or OPENROUTER_MODEL) if name == "openrouter"
+            else (model or HERMES_MODEL) if name == "hermes"
+            else OLLAMA_MODEL
         )
         try:
             if name == "openrouter" and _should_offer_local_terminal_tools(user_content):
@@ -857,11 +910,16 @@ def _complete_message(
                     temperature,
                     max_tokens,
                 )
+            _extract_reply(result)
             provider = name
             provider_model_used = provider_model
             break
-        except HTTPException:
-            raise
+        except HTTPException as exc:
+            if exc.status_code < 500:
+                raise
+            print("RZ_PROVIDER_ERROR", {"provider": name, "status": exc.status_code, "model": provider_model}, flush=True)
+            last_error = RuntimeError(f"{name} HTTP {exc.status_code}: {str(exc.detail)[:200]}")
+            continue
         except HTTPError as exc:
             # Log only provider/model and the provider's structured error message.
             # Never log authorization headers, prompts, or response content.
@@ -878,8 +936,9 @@ def _complete_message(
             except Exception:
                 pass
             provider_model = (
-                model or OPENROUTER_MODEL if name == "openrouter"
-                else model or HERMES_MODEL
+                (model or OPENROUTER_MODEL) if name == "openrouter"
+                else (model or HERMES_MODEL) if name == "hermes"
+                else OLLAMA_MODEL
             )
             print(
                 "RZ_PROVIDER_ERROR",
@@ -903,7 +962,7 @@ def _complete_message(
                 {
                     "provider": name,
                     "error_type": type(exc).__name__,
-                    "model": model or (OPENROUTER_MODEL if name == "openrouter" else HERMES_MODEL),
+                    "model": (model or OPENROUTER_MODEL) if name == "openrouter" else (model or HERMES_MODEL) if name == "hermes" else OLLAMA_MODEL,
                 },
                 flush=True,
             )
@@ -985,6 +1044,8 @@ def health():
         "providers": {
             "openrouter": bool(OPENROUTER_API_KEY and not _is_placeholder(OPENROUTER_API_KEY)),
             "hermes_default": HERMES_ENABLED,
+            "ollama_fallback": OLLAMA_ENABLED,
+            "ollama_model": OLLAMA_MODEL if OLLAMA_ENABLED else None,
         },
     }
 

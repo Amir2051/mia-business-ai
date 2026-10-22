@@ -26,6 +26,10 @@ services:
         value: openrouter/free
       - key: OPENROUTER_MODEL
         value: nvidia/nemotron-3.5-lightning:free
+      - key: OLLAMA_BASE_URL
+        sync: false
+      - key: OLLAMA_MODEL
+        value: qwen3:1.7b
       - key: OPENROUTER_CODING_MODEL
         value: nvidia/nemotron-3.5-lightning:free
       - key: OPENROUTER_ANALYSIS_MODEL

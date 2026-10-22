@@ -13,6 +13,7 @@ from unittest import mock  # noqa: E402
 def app(monkeypatch):
     # Force local API-key mode even if the developer has a private .env file.
     monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "")
     os.environ["RZ_API_KEY"] = "test-key"
     os.environ["OPENROUTER_API_KEY"] = "real"
     os.environ["HERMES_API_KEY"] = "hermes-secret"
@@ -762,3 +763,35 @@ def test_cartesia_voice_endpoint_requires_server_configuration(app, monkeypatch)
     )
     assert response.status_code == 503
     assert "CARTESIA_API_KEY" in response.json()["detail"]
+
+
+
+def test_ollama_is_used_as_local_fallback_after_openrouter_failure(app, monkeypatch):
+    monkeypatch.setattr(app, "OLLAMA_ENABLED", True)
+    monkeypatch.setattr(app, "OLLAMA_MODEL", "qwen3:1.7b")
+
+    def fail_openrouter(*args, **kwargs):
+        raise RuntimeError("simulated OpenRouter ZDR/provider rejection")
+
+    def local_ollama(messages, model, temperature, max_tokens, tools=None, tool_choice="auto"):
+        assert model == "qwen3:1.7b"
+        assert messages[-1]["content"] == "Say local fallback works"
+        return {"model": model, "choices": [{"message": {"role": "assistant", "content": "Local Qwen fallback works."}}]}
+
+    monkeypatch.setattr(app, "_call_openrouter", fail_openrouter)
+    monkeypatch.setattr(app, "_call_ollama", local_ollama)
+    resp = app._complete_message("s", "Say local fallback works", "ollama-test", None, None, 80)
+    assert resp.status == "ok"
+    assert resp.provider == "ollama"
+    assert resp.model == "qwen3:1.7b"
+    assert resp.reply == "Local Qwen fallback works."
+
+
+def test_ollama_fallback_can_recover_from_empty_openrouter_reply(app, monkeypatch):
+    monkeypatch.setattr(app, "OLLAMA_ENABLED", True)
+    monkeypatch.setattr(app, "OLLAMA_MODEL", "qwen3:1.7b")
+    monkeypatch.setattr(app, "_call_openrouter", lambda *args, **kwargs: {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+    monkeypatch.setattr(app, "_call_ollama", lambda *args, **kwargs: {"model": "qwen3:1.7b", "choices": [{"message": {"content": "Recovered locally."}}]})
+    resp = app._complete_message("s", "hello", "ollama-empty-test", None, None, 80)
+    assert resp.provider == "ollama"
+    assert resp.reply == "Recovered locally."
