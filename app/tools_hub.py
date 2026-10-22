@@ -52,6 +52,7 @@ def _conn():
             audit_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, tool_id TEXT NOT NULL,
             event TEXT NOT NULL, outcome TEXT NOT NULL, details JSONB NOT NULL,
             created_at DOUBLE PRECISION NOT NULL)""")
+        conn.commit()
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS mia_tool_permissions (
             user_id TEXT NOT NULL, tool_id TEXT NOT NULL, enabled INTEGER NOT NULL,
