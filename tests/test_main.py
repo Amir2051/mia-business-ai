@@ -39,6 +39,41 @@ def test_placeholder_openrouter_skips_to_502(app):
         raise AssertionError("expected a 502 when no provider is usable")
 
 
+def test_inworld_realtime_session_token_is_minted_without_exposing_api_key(app, monkeypatch):
+    credential = app.base64.b64encode(b"voice-key-id:voice-key-secret").decode("ascii")
+    monkeypatch.setattr(app, "INWORLD_API_KEY", credential)
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(req, timeout=10):
+        calls.append((req.full_url, dict(req.header_items()), timeout))
+        if req.full_url.endswith("/v1/sessionTokens/token:generate"):
+            assert req.get_header("Authorization").startswith("IW1-HMAC-SHA256 ApiKey=voice-key-id,")
+            assert "Signature=" in req.get_header("Authorization")
+            assert "voice-key-secret" not in req.get_header("Authorization")
+            return FakeResponse({"token": "temporary-session-token", "expirationTime": "2026-10-22T16:00:00Z"})
+        assert req.full_url.endswith("/v1/realtime/ice-servers")
+        assert req.get_header("Authorization") == "Basic " + credential
+        return FakeResponse({"ice_servers": [{"urls": ["stun:example.invalid"]}]})
+
+    monkeypatch.setattr(app, "urlopen", fake_urlopen)
+    result = app._mint_inworld_realtime_session()
+    assert result["token"] == "temporary-session-token"
+    assert result["ice_servers"][0]["urls"][0] == "stun:example.invalid"
+    assert result["url"] == "https://api.inworld.ai/v1/realtime/calls"
+    assert credential not in json.dumps(result)
+    assert len(calls) == 2
+
+
 def test_openrouter_provider_preferences_are_configurable(app, monkeypatch):
     captured = {}
 

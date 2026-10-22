@@ -1,5 +1,6 @@
 import base64
 import hmac
+import hashlib
 import json
 import os
 import re
@@ -1057,6 +1058,90 @@ def chat(request: ChatRequest, current_user: dict = Depends(require_app_user)):
         temperature=request.temperature,
         max_tokens=request.max_tokens,
     )
+
+
+def _mint_inworld_realtime_session() -> dict:
+    """Mint a short-lived browser session token without exposing Inworld credentials."""
+    if not INWORLD_API_KEY:
+        raise HTTPException(status_code=503, detail="Inworld realtime voice is not configured")
+    try:
+        credential = base64.b64decode(INWORLD_API_KEY, validate=True).decode("utf-8")
+        key_id, secret = credential.split(":", 1)
+        if not key_id or not secret:
+            raise ValueError("empty credential component")
+    except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+        raise HTTPException(status_code=503, detail="Inworld realtime credentials are invalid") from None
+
+    host = "api.inworld.ai"
+    method = "ai.inworld.engine.v1.SessionTokens/GenerateSessionToken"
+    date_time = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+    nonce = uuid.uuid4().hex
+    signature = ("IW1" + secret).encode("utf-8")
+    for part in (date_time, host, method, nonce, "iw1_request"):
+        signature = hmac.new(signature, part.encode("utf-8"), hashlib.sha256).digest()
+    authorization = (
+        f"IW1-HMAC-SHA256 ApiKey={key_id},DateTime={date_time},Nonce={nonce},Signature={signature.hex()}"
+    )
+    token_request = URLRequest(
+        "https://api.inworld.ai/v1/sessionTokens/token:generate",
+        data=json.dumps({"api_key": key_id}).encode("utf-8"),
+        headers={"Authorization": authorization, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(token_request, timeout=10) as response:
+            token_data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        print("INWORLD_REALTIME_TOKEN_ERROR", {"status": exc.code}, flush=True)
+        raise HTTPException(status_code=502, detail="Could not start Inworld realtime voice session") from None
+    except Exception as exc:
+        print("INWORLD_REALTIME_TOKEN_ERROR", {"error_type": type(exc).__name__}, flush=True)
+        raise HTTPException(status_code=502, detail="Could not start Inworld realtime voice session") from None
+
+    token = token_data.get("token")
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=502, detail="Inworld did not return a realtime session token")
+
+    ice_servers = []
+    ice_request = URLRequest(
+        "https://api.inworld.ai/v1/realtime/ice-servers",
+        headers={"Authorization": "Basic " + INWORLD_API_KEY},
+        method="GET",
+    )
+    try:
+        with urlopen(ice_request, timeout=8) as response:
+            ice_data = json.loads(response.read().decode("utf-8"))
+            if isinstance(ice_data.get("ice_servers"), list):
+                ice_servers = ice_data["ice_servers"]
+    except Exception as exc:
+        # WebRTC may still connect using default ICE routes; do not expose upstream details.
+        print("INWORLD_REALTIME_ICE_WARNING", {"error_type": type(exc).__name__}, flush=True)
+
+    return {
+        "token": token,
+        "expirationTime": token_data.get("expirationTime"),
+        "ice_servers": ice_servers,
+        "url": "https://api.inworld.ai/v1/realtime/calls",
+    }
+
+
+_VOICE_TOKEN_ISSUES = {}
+_VOICE_TOKEN_LOCK = threading.Lock()
+
+
+@app.post("/v1/voice/realtime-token")
+def create_realtime_voice_token(current_user: dict = Depends(require_app_user)):
+    """Issue a short-lived, user-authenticated token for the browser's Inworld WebRTC session."""
+    user_id = str(current_user.get("id", ""))
+    now = time.time()
+    with _VOICE_TOKEN_LOCK:
+        recent = [stamp for stamp in _VOICE_TOKEN_ISSUES.get(user_id, []) if now - stamp < 60]
+        if len(recent) >= 10:
+            raise HTTPException(status_code=429, detail="Too many voice session attempts; wait a minute and retry")
+        recent.append(now)
+        _VOICE_TOKEN_ISSUES[user_id] = recent
+    result = _mint_inworld_realtime_session()
+    return JSONResponse(result, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
 @app.post("/v1/voice/synthesize")
