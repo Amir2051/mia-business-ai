@@ -26,6 +26,26 @@ def test_preferences_are_saved_and_used_for_user(monkeypatch, tmp_path):
         client.close()
         sys.modules.pop('app.main',None)
 
+def test_preferences_are_isolated_between_user_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv('RZ_API_KEY','prefs-isolation-key')
+    monkeypatch.setenv('RZ_LOCAL_DATA_PATH',str(tmp_path / 'prefs-isolation.sqlite3'))
+    monkeypatch.setenv('DATABASE_URL','')
+    sys.modules.pop('app.main',None)
+    import app.main as module
+    from app.user_preferences import get_preferences, save_preferences, Preferences
+    from unittest.mock import patch
+    client=TestClient(module.app)
+    try:
+        # Use the same persistence layer with two distinct authenticated identities.
+        with patch('app.user_preferences._user', return_value={'id':'user-one'}):
+            save_preferences(Preferences(personality='creative',custom_instructions='User one only',response_length='detailed',preferred_language='en'), {'id':'user-one'})
+        assert get_preferences('user-one')['custom_instructions']=='User one only'
+        assert get_preferences('user-two')['custom_instructions']==''
+        assert get_preferences('user-two')['personality']=='balanced'
+    finally:
+        client.close()
+        sys.modules.pop('app.main',None)
+
 def test_preferences_reject_unsupported_values(monkeypatch, tmp_path):
     monkeypatch.setenv('RZ_API_KEY','prefs-test-key')
     monkeypatch.setenv('RZ_LOCAL_DATA_PATH',str(tmp_path / 'prefs-invalid.sqlite3'))

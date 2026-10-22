@@ -87,8 +87,9 @@ def accounts(user:dict=Depends(_current_user)):
 def create_draft(body:Draft,user:dict=Depends(_current_user)):
  c,k=_db(); uid=_uid(user)
  try:
-  q="SELECT id,provider FROM rz_social_accounts WHERE id=%s AND user_id=%s" if k=="postgres" else "SELECT id,provider FROM rz_social_accounts WHERE id=? AND user_id=?"; a=c.execute(q,(body.account_id,uid)).fetchone()
+  q="SELECT id,provider,external_id FROM rz_social_accounts WHERE id=%s AND user_id=%s" if k=="postgres" else "SELECT id,provider,external_id FROM rz_social_accounts WHERE id=? AND user_id=?"; a=c.execute(q,(body.account_id,uid)).fetchone()
   if not a: raise HTTPException(404,"Connected social account not found.")
+  if body.target_id != a[2]: raise HTTPException(422,"Draft target must match the selected connected account.")
   did=uuid.uuid4().hex; now=time.time(); q="INSERT INTO rz_marketing_items(id,user_id,provider,target_id,caption,status,created_at) VALUES(%s,%s,%s,%s,%s,'draft',%s)" if k=="postgres" else "INSERT INTO rz_marketing_items(id,user_id,provider,target_id,caption,status,created_at) VALUES(?,?,?,?,?,'draft',?)"
   c.execute(q,(did,uid,a[1],body.target_id,body.caption.strip(),now)); c.commit()
  finally:c.close()
