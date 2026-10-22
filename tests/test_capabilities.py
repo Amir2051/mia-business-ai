@@ -187,3 +187,72 @@ def test_capability_status_discloses_local_sqlite_durability_limit(app, monkeypa
     assert "may not survive" in status["persistent_memory"]["warning"]
     assert status["web_research"]["available"] is True
     assert status["web_research"]["provider_configured"] is False
+
+def test_agent_run_ledger_persists_events_and_is_user_scoped(app):
+    from app import capabilities
+    run = capabilities.create_agent_run('alice', 'alice:session-1', 'Research and summarize a topic')
+    assert run['status'] == 'running'
+    capabilities.record_agent_run_event('alice', run['id'], {'type': 'tool_started', 'tool': 'mia_web_research', 'arguments': {'query': 'safe topic'}})
+    capabilities.record_agent_run_event('alice', run['id'], {'type': 'tool_completed', 'tool': 'mia_web_research', 'result': {'count': 2}})
+    finished = capabilities.finish_agent_run('alice', run['id'], 'completed', final_response='Summary ready')
+    assert finished['status'] == 'completed'
+    listed = capabilities.list_agent_runs('alice')
+    assert listed['count'] == 1
+    item = listed['runs'][0]
+    assert item['id'] == run['id'] and item['status'] == 'completed'
+    assert item['final_response'] == 'Summary ready'
+    assert [e['type'] for e in item['events']] == ['tool_started', 'tool_completed']
+    assert capabilities.list_agent_runs('bob')['count'] == 0
+    with pytest.raises(KeyError): capabilities.finish_agent_run('bob', run['id'], 'completed')
+
+def test_agent_run_ledger_validates_bounds(app):
+    from app import capabilities
+    with pytest.raises(ValueError): capabilities.create_agent_run('', 'session', 'request')
+    with pytest.raises(ValueError): capabilities.create_agent_run('alice', 'session', ' ')
+    with pytest.raises(ValueError): capabilities.list_agent_runs('alice', True)
+    run = capabilities.create_agent_run('alice', 'alice:s', 'request')
+    with pytest.raises(ValueError): capabilities.finish_agent_run('alice', run['id'], 'running')
+
+
+def test_stale_run_recovery_marks_uncertain_tool_without_retry(app, monkeypatch):
+    from app import capabilities
+    run = capabilities.create_agent_run('alice', 'alice:session', 'Inspect a repo')
+    capabilities.record_agent_run_event('alice', run['id'], {'type': 'tool_started', 'tool': 'mia_github_read', 'argument_keys': ['repo']})
+    real_time = capabilities.time.time
+    monkeypatch.setattr(capabilities.time, 'time', lambda: real_time() + 2000)
+    recovered = capabilities.recover_stale_agent_runs('alice', 900)
+    assert recovered['count'] == 1
+    assert recovered['recovered'][0]['id'] == run['id']
+    assert recovered['recovered'][0]['uncertain_tools'] == ['mia_github_read']
+    history = capabilities.list_agent_runs('alice')['runs'][0]
+    assert history['status'] == 'interrupted'
+    assert any(e['type'] == 'tool_outcome_unknown' for e in history['events'])
+    assert 'Do not retry automatically' in str(history['events'])
+    assert capabilities.recover_stale_agent_runs('bob', 900)['count'] == 0
+
+
+def test_stale_run_recovery_does_not_flag_finished_tools(app, monkeypatch):
+    from app import capabilities
+    run = capabilities.create_agent_run('alice', 'alice:session', 'Research')
+    capabilities.record_agent_run_event('alice', run['id'], {'type': 'tool_started', 'tool': 'mia_web_research'})
+    capabilities.record_agent_run_event('alice', run['id'], {'type': 'tool_completed', 'tool': 'mia_web_research', 'result': {'ok': True}})
+    real_time = capabilities.time.time
+    monkeypatch.setattr(capabilities.time, 'time', lambda: real_time() + 2000)
+    recovered = capabilities.recover_stale_agent_runs('alice', 900)
+    assert recovered['recovered'][0]['uncertain_tools'] == []
+    with pytest.raises(ValueError): capabilities.recover_stale_agent_runs('alice', 30)
+
+
+def test_terminal_approvals_persist_and_are_user_scoped(app):
+    from app import capabilities
+    job_id = 'e' * 32
+    created = capabilities.create_terminal_approval('alice', job_id, 'pwd', 'dev-terminal')
+    assert created['status'] == 'pending_approval'
+    assert capabilities.list_terminal_approvals('alice')['jobs'][0]['id'] == job_id
+    assert capabilities.list_terminal_approvals('bob')['jobs'] == []
+    decision = capabilities.decide_terminal_approval('alice', job_id, 'deny')
+    assert decision['status'] == 'denied'
+    with pytest.raises(RuntimeError): capabilities.decide_terminal_approval('alice', job_id, 'approve')
+    capabilities.finish_terminal_approval('alice', job_id, {'status': 'denied', 'message': 'User denied'})
+    history = capabilities.list_terminal_approvals('alice', pending_only=False)['jobs']
+    assert history[0]['result']['status'] == 'denied'

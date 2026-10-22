@@ -266,6 +266,15 @@ def _db():
             user_id TEXT NOT NULL, task_id TEXT NOT NULL, title TEXT NOT NULL,
             status TEXT NOT NULL, steps JSONB NOT NULL, created_at DOUBLE PRECISION NOT NULL,
             updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id, task_id))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_runs (
+            user_id TEXT NOT NULL, run_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            status TEXT NOT NULL, user_request TEXT NOT NULL, events JSONB NOT NULL,
+            final_response TEXT, error TEXT, created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id, run_id))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS rz_terminal_approvals (
+            user_id TEXT NOT NULL, job_id TEXT NOT NULL, command TEXT NOT NULL, workspace TEXT NOT NULL,
+            approval TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id, job_id))''')
         return conn, 'postgres'
     path = os.getenv('RZ_LOCAL_DATA_PATH', str(Path.home() / '.rz-ai-agent' / 'capabilities.sqlite3'))
     Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -277,6 +286,15 @@ def _db():
         user_id TEXT NOT NULL, task_id TEXT NOT NULL, title TEXT NOT NULL,
         status TEXT NOT NULL, steps TEXT NOT NULL, created_at REAL NOT NULL,
         updated_at REAL NOT NULL, PRIMARY KEY(user_id, task_id))''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_runs (
+        user_id TEXT NOT NULL, run_id TEXT NOT NULL, session_id TEXT NOT NULL,
+        status TEXT NOT NULL, user_request TEXT NOT NULL, events TEXT NOT NULL,
+        final_response TEXT, error TEXT, created_at REAL NOT NULL,
+        updated_at REAL NOT NULL, PRIMARY KEY(user_id, run_id))''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS rz_terminal_approvals (
+            user_id TEXT NOT NULL, job_id TEXT NOT NULL, command TEXT NOT NULL, workspace TEXT NOT NULL,
+            approval TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at REAL NOT NULL,
+            updated_at REAL NOT NULL, PRIMARY KEY(user_id, job_id))''')
     conn.commit()
     return conn, 'sqlite'
 
@@ -352,6 +370,171 @@ def update_task_step(user_id: str, task_id: str, index: int, status: str) -> dic
         return {'id': task_id, 'title': row[0], 'status': task_status, 'steps': steps, 'created_at': row[3], 'updated_at': now}
     finally: conn.close()
 
+
+
+def create_agent_run(user_id: str, session_id: str, user_request: str) -> dict:
+    """Create a durable, account-scoped execution ledger for a bounded MIA run."""
+    if not isinstance(user_id, str) or not user_id or len(user_id) > 200:
+        raise ValueError('invalid user id')
+    if not isinstance(session_id, str) or not session_id or len(session_id) > 300:
+        raise ValueError('invalid session id')
+    if not isinstance(user_request, str) or not user_request.strip() or len(user_request) > 12000:
+        raise ValueError('request must contain 1–12000 characters')
+    run_id, now = uuid.uuid4().hex, time.time()
+    conn, kind = _db()
+    try:
+        query = ('INSERT INTO rz_agent_runs(user_id,run_id,session_id,status,user_request,events,created_at,updated_at) '
+                 'VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s,%s)' if kind == 'postgres' else
+                 'INSERT INTO rz_agent_runs(user_id,run_id,session_id,status,user_request,events,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+        conn.execute(query, (user_id, run_id, session_id, 'running', user_request.strip(), json.dumps([]), now, now))
+        conn.commit()
+    finally: conn.close()
+    return {'id': run_id, 'status': 'running', 'created_at': now, 'events': []}
+
+
+def record_agent_run_event(user_id: str, run_id: str, event: dict) -> dict:
+    if not isinstance(event, dict) or len(json.dumps(event, ensure_ascii=False)) > 26000:
+        raise ValueError('event must be an object no larger than 26 KB')
+    conn, kind = _db()
+    try:
+        select = 'SELECT events FROM rz_agent_runs WHERE user_id=%s AND run_id=%s' if kind == 'postgres' else 'SELECT events FROM rz_agent_runs WHERE user_id=? AND run_id=?'
+        row = conn.execute(select, (user_id, run_id)).fetchone()
+        if not row: raise KeyError('Agent run not found')
+        events = row[0] if isinstance(row[0], list) else json.loads(row[0])
+        events.append({**event, 'at': time.time()})
+        # Keep a bounded recent event trail; runs themselves remain durable.
+        events = events[-100:]
+        update = 'UPDATE rz_agent_runs SET events=%s::jsonb,updated_at=%s WHERE user_id=%s AND run_id=%s' if kind == 'postgres' else 'UPDATE rz_agent_runs SET events=?,updated_at=? WHERE user_id=? AND run_id=?'
+        conn.execute(update, (json.dumps(events, ensure_ascii=False), time.time(), user_id, run_id))
+        conn.commit()
+        return {'id': run_id, 'event_count': len(events)}
+    finally: conn.close()
+
+
+def finish_agent_run(user_id: str, run_id: str, status: str, final_response: str | None = None, error: str | None = None) -> dict:
+    if status not in {'completed', 'failed', 'interrupted'}: raise ValueError('invalid run status')
+    if final_response is not None: final_response = str(final_response)[:12000]
+    if error is not None: error = str(error)[:1000]
+    conn, kind = _db()
+    try:
+        update = 'UPDATE rz_agent_runs SET status=%s,final_response=%s,error=%s,updated_at=%s WHERE user_id=%s AND run_id=%s' if kind == 'postgres' else 'UPDATE rz_agent_runs SET status=?,final_response=?,error=?,updated_at=? WHERE user_id=? AND run_id=?'
+        cur = conn.execute(update, (status, final_response, error, time.time(), user_id, run_id))
+        conn.commit()
+        if not cur.rowcount: raise KeyError('Agent run not found')
+        return {'id': run_id, 'status': status}
+    finally: conn.close()
+
+
+def list_agent_runs(user_id: str, limit: int = 20) -> dict:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+        raise ValueError('limit must be from 1 to 50')
+    conn, kind = _db()
+    try:
+        query = ('SELECT run_id,session_id,status,user_request,events,final_response,error,created_at,updated_at FROM rz_agent_runs WHERE user_id=%s ORDER BY updated_at DESC LIMIT %s' if kind == 'postgres' else 'SELECT run_id,session_id,status,user_request,events,final_response,error,created_at,updated_at FROM rz_agent_runs WHERE user_id=? ORDER BY updated_at DESC LIMIT ?')
+        rows = conn.execute(query, (user_id, limit)).fetchall()
+    finally: conn.close()
+    runs = []
+    for r in rows:
+        events = r[4] if isinstance(r[4], list) else json.loads(r[4])
+        runs.append({'id':r[0], 'session_id':r[1], 'status':r[2], 'request':r[3], 'events':events, 'final_response':r[5], 'error':r[6], 'created_at':r[7], 'updated_at':r[8]})
+    return {'runs': runs, 'count': len(runs)}
+
+
+
+def recover_stale_agent_runs(user_id: str, stale_seconds: int = 900) -> dict:
+    """Mark this user's abandoned runs interrupted; never replay uncertain tools.
+
+    A tool_started event without a matching tool_completed/tool_failed is recorded as
+    outcome_unknown because the side effect may already have happened.
+    """
+    if not isinstance(user_id, str) or not user_id or len(user_id) > 200:
+        raise ValueError('invalid user id')
+    if not isinstance(stale_seconds, int) or isinstance(stale_seconds, bool) or not 60 <= stale_seconds <= 86400:
+        raise ValueError('stale_seconds must be from 60 to 86400')
+    conn, kind = _db()
+    now = time.time()
+    try:
+        select = ('SELECT run_id,events FROM rz_agent_runs WHERE user_id=%s AND status=%s AND updated_at < %s'
+                  if kind == 'postgres' else
+                  'SELECT run_id,events FROM rz_agent_runs WHERE user_id=? AND status=? AND updated_at < ?')
+        rows = conn.execute(select, (user_id, 'running', now - stale_seconds)).fetchall()
+        recovered = []
+        for run_id, raw_events in rows:
+            events = raw_events if isinstance(raw_events, list) else json.loads(raw_events)
+            # Only recent retained events are available; uncertainty always means no retry.
+            starts = {}
+            completed = set()
+            for event in events:
+                if event.get('type') == 'tool_started':
+                    starts[event.get('tool')] = event
+                elif event.get('type') in {'tool_completed', 'tool_failed'}:
+                    completed.add(event.get('tool'))
+            uncertain = sorted(str(name) for name in starts if name not in completed)
+            events.append({'type': 'run_interrupted', 'reason': 'stale_run_recovery',
+                           'uncertain_tools': uncertain, 'resume_policy': 'manual_review_no_automatic_retry', 'at': now})
+            events = events[-100:]
+            if uncertain:
+                events.append({'type': 'tool_outcome_unknown', 'tools': uncertain,
+                               'action': 'Do not retry automatically; inspect side effects first.', 'at': now})
+                events = events[-100:]
+            update = ('UPDATE rz_agent_runs SET status=%s,error=%s,events=%s::jsonb,updated_at=%s WHERE user_id=%s AND run_id=%s AND status=%s'
+                      if kind == 'postgres' else
+                      'UPDATE rz_agent_runs SET status=?,error=?,events=?,updated_at=? WHERE user_id=? AND run_id=? AND status=?')
+            cur = conn.execute(update, ('interrupted', 'Recovered stale run; review history before continuing.',
+                                        json.dumps(events, ensure_ascii=False), now, user_id, run_id, 'running'))
+            if cur.rowcount:
+                recovered.append({'id': run_id, 'status': 'interrupted', 'uncertain_tools': uncertain})
+        conn.commit()
+        return {'recovered': recovered, 'count': len(recovered)}
+    finally:
+        conn.close()
+
+
+def create_terminal_approval(user_id: str, job_id: str, command: str, workspace: str) -> dict:
+    allowed = {'pwd', 'python3 --version', 'uname -a', 'git status --short', 'git log -1 --oneline', 'git branch --show-current', 'ls -la'}
+    if not user_id or len(user_id) > 200 or not re.fullmatch(r'[a-f0-9]{32}', job_id): raise ValueError('invalid approval identity')
+    if command not in allowed or workspace not in {'dev-terminal', 'rz-ai-agent'}: raise ValueError('command/workspace is not allowlisted')
+    now = time.time(); conn, kind = _db()
+    try:
+        query = ('INSERT INTO rz_terminal_approvals(user_id,job_id,command,workspace,approval,status,result,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)' if kind == 'postgres' else 'INSERT INTO rz_terminal_approvals(user_id,job_id,command,workspace,approval,status,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        conn.execute(query, (user_id, job_id, command, workspace, 'pending', 'pending_approval', None, now, now)); conn.commit()
+    finally: conn.close()
+    return {'id': job_id, 'approval': 'pending', 'status': 'pending_approval', 'created': now}
+
+def list_terminal_approvals(user_id: str, pending_only: bool = True, limit: int = 20) -> dict:
+    if not user_id or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50: raise ValueError('invalid approval query')
+    conn, kind = _db()
+    try:
+        sql = ('SELECT job_id,command,workspace,approval,status,result,created_at FROM rz_terminal_approvals WHERE user_id=%s' if kind == 'postgres' else 'SELECT job_id,command,workspace,approval,status,result,created_at FROM rz_terminal_approvals WHERE user_id=?')
+        params = [user_id]
+        if pending_only: sql += ' AND approval=%s' if kind == 'postgres' else ' AND approval=?'; params.append('pending')
+        sql += ' ORDER BY created_at ASC LIMIT %s' if kind == 'postgres' else ' ORDER BY created_at ASC LIMIT ?'; params.append(limit)
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    finally: conn.close()
+    return {'jobs':[{'id':r[0], 'command':r[1], 'workspace':r[2], 'approval':r[3], 'status':r[4], 'result': json.loads(r[5]) if isinstance(r[5], str) else r[5], 'created':r[6]} for r in rows]}
+
+def decide_terminal_approval(user_id: str, job_id: str, decision: str) -> dict:
+    if decision not in {'approve','deny'}: raise ValueError('decision must be approve or deny')
+    conn, kind = _db(); now=time.time()
+    try:
+        select = 'SELECT approval,status,created_at FROM rz_terminal_approvals WHERE user_id=%s AND job_id=%s' if kind == 'postgres' else 'SELECT approval,status,created_at FROM rz_terminal_approvals WHERE user_id=? AND job_id=?'
+        row=conn.execute(select,(user_id,job_id)).fetchone()
+        if not row: raise KeyError('Pending local command not found')
+        if row[0] != 'pending': raise RuntimeError('This command already has a decision')
+        if now-row[2] > 110: decision='deny'; status='expired'; approval='expired'
+        else: approval='approved' if decision=='approve' else 'denied'; status='queued' if decision=='approve' else 'denied'
+        update='UPDATE rz_terminal_approvals SET approval=%s,status=%s,updated_at=%s WHERE user_id=%s AND job_id=%s AND approval=%s' if kind == 'postgres' else 'UPDATE rz_terminal_approvals SET approval=?,status=?,updated_at=? WHERE user_id=? AND job_id=? AND approval=?'
+        cur=conn.execute(update,(approval,status,now,user_id,job_id,'pending')); conn.commit()
+        if not cur.rowcount: raise RuntimeError('This command already has a decision')
+        return {'decision':decision,'status':status}
+    finally: conn.close()
+
+def finish_terminal_approval(user_id: str, job_id: str, result: dict) -> None:
+    safe=json.dumps(result, ensure_ascii=False)[:7000]; conn,kind=_db(); now=time.time()
+    try:
+        query='UPDATE rz_terminal_approvals SET status=%s,result=%s,updated_at=%s WHERE user_id=%s AND job_id=%s' if kind=='postgres' else 'UPDATE rz_terminal_approvals SET status=?,result=?,updated_at=? WHERE user_id=? AND job_id=?'
+        conn.execute(query,(str(result.get('status','error'))[:30],safe,now,user_id,job_id)); conn.commit()
+    finally: conn.close()
 
 def extract_document(filename: str, content_base64: str) -> dict:
     """Extract bounded text from txt/md/code, DOCX, and PDF uploads."""

@@ -31,6 +31,15 @@ def app(monkeypatch):
         os.environ.pop(key, None)
 
 
+def test_mia_core_identity_always_knows_rz_and_rz_agent(app):
+    identity = app.ASSISTANT_IDENTITY.lower()
+    assert "rz, also known as ronzoro" in identity
+    assert "creator and operator" in identity
+    assert "rz agent is the platform" in identity
+    assert "do not say rz is unknown" in identity
+    assert "does not grant permission" in identity
+
+
 def test_placeholder_openrouter_skips_to_502(app):
     try:
         app._complete_message("s", "hello", "sess1", None, None, None)
@@ -638,22 +647,24 @@ def test_local_terminal_tool_loop_uses_real_tool_result_and_never_executes_direc
 
 def test_local_terminal_pending_approval_is_user_scoped_and_enqueues_only_after_approval(app, monkeypatch):
     from fastapi.testclient import TestClient
-    import threading
+    import threading, uuid
     client = TestClient(app.app)
     monkeypatch.setattr(app, "MIA_TERMINAL_BRIDGE_TOKEN", "bridge-test-secret")
-    job_id = "b" * 32
+    job_id = uuid.uuid4().hex
     event = threading.Event()
     job = {
         "id": job_id, "command": "pwd", "workspace": "dev-terminal",
         "owner_id": "local", "approval": "pending", "status": "pending_approval",
         "event": event, "result": None, "created": app.time.time()
     }
+    app.cap_services.create_terminal_approval("local", job_id, "pwd", "dev-terminal")
     with app._LOCAL_TERMINAL_LOCK:
         app._LOCAL_TERMINAL_JOBS[job_id] = job
     assert client.get("/v1/local-terminal/pending").status_code == 401
     pending = client.get("/v1/local-terminal/pending", headers={"X-API-Key": "test-key"})
     assert pending.status_code == 200
-    assert pending.json()["jobs"] == [{"id": job_id, "command": "pwd", "workspace": "dev-terminal", "created": job["created"]}]
+    pending_job = next(item for item in pending.json()["jobs"] if item["id"] == job_id)
+    assert {key: pending_job[key] for key in ("id", "command", "workspace")} == {"id": job_id, "command": "pwd", "workspace": "dev-terminal"}
     assert app._LOCAL_TERMINAL_QUEUE.empty()
     decision = client.post(f"/v1/local-terminal/decision/{job_id}", headers={"X-API-Key": "test-key"}, json={"decision": "approve"})
     assert decision.status_code == 200
@@ -667,15 +678,16 @@ def test_local_terminal_pending_approval_is_user_scoped_and_enqueues_only_after_
 
 def test_local_terminal_denial_wakes_waiting_chat_without_queueing(app):
     from fastapi.testclient import TestClient
-    import threading
+    import threading, uuid
     client = TestClient(app.app)
-    job_id = "c" * 32
+    job_id = uuid.uuid4().hex
     event = threading.Event()
     job = {
         "id": job_id, "command": "pwd", "workspace": "dev-terminal",
         "owner_id": "local", "approval": "pending", "status": "pending_approval",
         "event": event, "result": None, "created": app.time.time()
     }
+    app.cap_services.create_terminal_approval("local", job_id, "pwd", "dev-terminal")
     with app._LOCAL_TERMINAL_LOCK:
         app._LOCAL_TERMINAL_JOBS[job_id] = job
     response = client.post(f"/v1/local-terminal/decision/{job_id}", headers={"X-API-Key": "test-key"}, json={"decision": "deny"})
@@ -799,6 +811,98 @@ def test_ollama_fallback_can_recover_from_empty_openrouter_reply(app, monkeypatc
 
 def test_mia_agent_tool_router_is_opt_in(app):
     assert app._should_use_mia_agent_tools("Act as an agent and research and create a plan")
+    assert app._should_use_mia_agent_tools("Resume the task and track my progress")
     assert not app._should_use_mia_agent_tools("Hi MIA, how are you?")
     names = {item["function"]["name"] for item in app.MIA_AGENT_TOOLS}
-    assert {"mia_web_search", "mia_open_page", "mia_memory_list", "mia_memory_save", "mia_task_create", "mia_read_document", "mia_review_code", "mia_github_read", "mia_request_local_command"} <= names
+    assert {"mia_web_search", "mia_open_page", "mia_memory_list", "mia_memory_save", "mia_task_create", "mia_task_list", "mia_task_update_step", "mia_read_document", "mia_review_code", "mia_github_read", "mia_request_local_command"} <= names
+
+
+def test_mia_agent_tool_arguments_are_validated_server_side(app):
+    app._validate_mia_agent_tool_args("mia_task_update_step", {"task_id": "task-1", "step_index": 0, "status": "completed"})
+    with pytest.raises(ValueError, match="Unexpected"):
+        app._validate_mia_agent_tool_args("mia_task_update_step", {"task_id": "task-1", "step_index": 0, "status": "completed", "owner_id": "someone-else"})
+    with pytest.raises(ValueError, match="integer"):
+        app._validate_mia_agent_tool_args("mia_task_update_step", {"task_id": "task-1", "step_index": True, "status": "completed"})
+    with pytest.raises(ValueError, match="unsupported"):
+        app._validate_mia_agent_tool_args("mia_task_update_step", {"task_id": "task-1", "step_index": 0, "status": "skip_auth"})
+
+
+def test_mia_agent_task_tools_are_scoped_and_update_progress(app, monkeypatch):
+    owner = "account-123"
+    task = {"id": "task-1", "title": "Build feature", "status": "in_progress", "steps": [{"title": "Inspect", "status": "in_progress"}]}
+    calls = []
+    monkeypatch.setattr(app.cap_services, "list_tasks", lambda user_id, limit: calls.append(("list", user_id, limit)) or {"tasks": [task], "count": 1})
+    monkeypatch.setattr(app.cap_services, "update_task_step", lambda user_id, task_id, index, status: calls.append(("update", user_id, task_id, index, status)) or task)
+    listed = app._dispatch_mia_agent_tool("mia_task_list", {"limit": 5}, owner, owner + ":session")
+    updated = app._dispatch_mia_agent_tool("mia_task_update_step", {"task_id": "task-1", "step_index": 0, "status": "completed"}, owner, owner + ":session")
+    assert listed["count"] == 1 and listed["tasks"][0]["id"] == "task-1"
+    assert updated["task"]["id"] == "task-1"
+    assert calls == [("list", owner, 5), ("update", owner, "task-1", 0, "completed")]
+
+
+def test_mia_agent_task_update_rejects_invalid_step_and_status(app, monkeypatch):
+    monkeypatch.setattr(app.cap_services, "update_task_step", lambda *args: (_ for _ in ()).throw(AssertionError("must validate first")))
+    with pytest.raises(ValueError):
+        app._dispatch_mia_agent_tool("mia_task_update_step", {"task_id": "x", "step_index": True, "status": "completed"}, "owner", "owner:session")
+    with pytest.raises(ValueError):
+        app._dispatch_mia_agent_tool("mia_task_update_step", {"task_id": "x", "step_index": 0, "status": "invented"}, "owner", "owner:session")
+
+
+def test_mia_agent_loop_executes_task_tool_then_summarizes_verified_result(app, monkeypatch):
+    calls = []
+    def fake_completion(messages, model, temperature, max_tokens, **kwargs):
+        calls.append((messages, kwargs))
+        if len(calls) == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": "I'll save the checklist.", "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "mia_task_create", "arguments": json.dumps({"title": "Launch feature", "steps": ["Inspect", "Test"]})}}]}}]}
+        assert any(message.get("role") == "tool" and message.get("tool_call_id") == "call-1" and '"id": "task-42"' in message.get("content", "") for message in messages)
+        return {"choices": [{"message": {"role": "assistant", "content": "Created the Launch feature checklist with two steps."}}]}
+    monkeypatch.setattr(app, "_call_openrouter", fake_completion)
+    monkeypatch.setattr(app.cap_services, "list_tasks", lambda owner, limit: {"tasks": [], "count": 0})
+    monkeypatch.setattr(app.cap_services, "create_task", lambda owner, title, steps: {"id": "task-42", "title": title, "status": "pending", "steps": [{"title": step, "status": "pending"} for step in steps]})
+    result = app._complete_with_mia_agent_tools("system", "Act as an agent and create a task", "owner-7:session-1", "test-model", 0, 200)
+    assert result["choices"][0]["message"]["content"].startswith("Created the Launch feature")
+    assert len(calls) == 2
+    assert calls[0][1]["tools"] == app.MIA_AGENT_TOOLS
+
+def test_agent_run_history_endpoint_is_authenticated_and_owner_scoped(app):
+    from fastapi.testclient import TestClient
+    client = TestClient(app.app)
+    assert client.get('/v1/agent/runs').status_code == 401
+    from app import capabilities
+    capabilities.create_agent_run('local', 'local:session', 'My private agent request')
+    response = client.get('/v1/agent/runs', headers={'X-API-Key': 'test-key'})
+    assert response.status_code == 200
+    data = response.json()
+    assert data['count'] >= 1
+    assert any(item['request'] == 'My private agent request' for item in data['runs'])
+    assert client.get('/v1/agent/runs?limit=0', headers={'X-API-Key': 'test-key'}).status_code == 400
+
+
+def test_agent_run_recovery_endpoint_requires_auth_and_is_owner_scoped(app):
+    from fastapi.testclient import TestClient
+    from app import capabilities
+    client = TestClient(app.app)
+    assert client.post('/v1/agent/runs/recover').status_code == 401
+    run = capabilities.create_agent_run('local', 'local:session', 'Private run')
+    response = client.post('/v1/agent/runs/recover?stale_seconds=30', headers={'X-API-Key': 'test-key'})
+    assert response.status_code == 400
+    response = client.post('/v1/agent/runs/recover?stale_seconds=900', headers={'X-API-Key': 'test-key'})
+    assert response.status_code == 200
+    assert all(item['status'] != 'running' for item in response.json()['recovered'])
+    history = capabilities.list_agent_runs('local')['runs']
+    assert next(item for item in history if item['id'] == run['id'])['status'] == 'running'
+
+
+def test_orphaned_persisted_terminal_approval_cannot_be_executed_after_restart(app):
+    from fastapi.testclient import TestClient
+    import uuid
+    client = TestClient(app.app)
+    job_id = uuid.uuid4().hex
+    app.cap_services.create_terminal_approval('local', job_id, 'pwd', 'dev-terminal')
+    # No in-memory waiter exists, simulating a server restart after request persistence.
+    response = client.post(f'/v1/local-terminal/decision/{job_id}', headers={'X-API-Key': 'test-key'}, json={'decision': 'approve'})
+    assert response.status_code == 410
+    assert app._LOCAL_TERMINAL_QUEUE.empty()
+    history = app.cap_services.list_terminal_approvals('local', pending_only=False, limit=50)['jobs']
+    item = next(row for row in history if row['id'] == job_id)
+    assert item['approval'] == 'denied'
