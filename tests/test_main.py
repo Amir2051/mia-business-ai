@@ -446,3 +446,25 @@ def test_api_token_creation_returns_secret_once_and_stores_only_hash(app, monkey
     assert result["token"].startswith("rzat_")
     assert result["warning"].endswith("cannot be displayed again.")
     assert result["scopes"] == ["mcp:call", "mcp:read"]
+
+
+
+def test_scoped_bearer_auth_is_accepted_for_api_clients(app, monkeypatch):
+    import importlib
+
+    monkeypatch.setattr(app, "DATABASE_AUTH_ENABLED", True)
+    auth_module = importlib.import_module("app.auth")
+    seen = {}
+
+    def fake_get_user_from_bearer(authorization, required_scope=None):
+        seen["authorization"] = authorization
+        seen["required_scope"] = required_scope
+        return {"id": "user-123", "email": "test@example.com", "scopes": ["mcp:call"]}
+
+    monkeypatch.setattr(auth_module, "get_user_from_bearer", fake_get_user_from_bearer)
+    user = app.require_app_user(None, "Bearer rzat_test-token", "")
+    assert user["id"] == "user-123"
+    assert seen == {
+        "authorization": "Bearer rzat_test-token",
+        "required_scope": "mcp:call",
+    }

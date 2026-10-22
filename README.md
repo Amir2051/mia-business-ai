@@ -144,3 +144,22 @@ cd <your-new-slack-project>
 The helper checks for the `slack` executable, downloads the official installer to a temporary file before asking for confirmation, and delegates interactive login/project creation/running to Slack CLI. It does not collect or persist Slack credentials. Never commit `.env` files, tokens, signing secrets, or client secrets. Review app scopes and manifest before installing the app in a workspace. `slack run` runs locally and is not a production deployment.
 
 Official quickstart: https://docs.slack.dev/quickstart
+
+
+## Terminal client
+
+The same assistant can be used from a terminal as well as the browser UI. This client uses the account's scoped bearer token; it does not store the token in its session file.
+
+1. Sign in at `https://rz-ai.safenestt.com`.
+2. Open **RZ MCP + Plugins** and create an API token with the `mcp:call` scope. Copy it once; do not paste it into chat or commit it.
+3. On Kali/Linux, from a local checkout of this repository:
+
+```bash
+chmod +x scripts/rz-ai
+export RZ_API_TOKEN='paste-your-scoped-token-here'
+./scripts/rz-ai
+```
+
+For a one-shot prompt use `./scripts/rz-ai -m "Explain this error"`. To use a different base URL, set `RZ_AI_URL`; the default is `https://rz-ai.safenestt.com`. The CLI stores only a random conversation identifier in `~/.config/rz-ai/session` with restrictive file permissions. The API token remains in the shell environment and is never written by the client.
+
+**Important:** the terminal client sends prompts to the hosted assistant. It does not itself grant the hosted service access to your Kali shell. Local-machine command execution requires a separate, authenticated local bridge and should be enabled only with explicit command approval.

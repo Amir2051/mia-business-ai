@@ -54,11 +54,24 @@ def require_api_key(x_api_key: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
-def require_app_user(request: Request, x_api_key: str = Header(default="")):
-    """Use persistent accounts in cloud mode and preserve API-key auth locally."""
+def require_app_user(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_api_key: str = Header(default=""),
+):
+    """Authenticate browser sessions and scoped terminal/API clients safely."""
     if DATABASE_AUTH_ENABLED:
+        if authorization:
+            from app.auth import get_user_from_bearer
+            return get_user_from_bearer(authorization, required_scope="mcp:call")
         return _get_database_user(request)
-    require_api_key(x_api_key)
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Bearer token required")
+        require_api_key(token)
+    else:
+        require_api_key(x_api_key)
     return {"id": "local", "email": "local@rz-agent"}
 
 

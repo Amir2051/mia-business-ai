@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Terminal client for the hosted RZ AI Agent. Uses only the standard library."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DEFAULT_URL = "https://rz-ai.safenestt.com"
+
+
+def session_path() -> Path:
+    return Path.home() / ".config" / "rz-ai" / "session"
+
+
+def load_session() -> str:
+    path = session_path()
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        if value and len(value) <= 80 and all(c.isalnum() or c in "-_" for c in value):
+            return value
+    except OSError:
+        pass
+    import secrets
+    value = secrets.token_urlsafe(12)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text(value + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return value
+
+
+def ask(base_url: str, token: str, message: str, session: str, model: str | None) -> str:
+    body = {"message": message, "session_id": session}
+    if model:
+        body["model"] = model
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/chat",
+        data=data,
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "rz-ai-terminal/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read(4096).decode("utf-8")).get("detail", "request failed")
+        except Exception:
+            detail = "request failed"
+        raise RuntimeError(f"RZ AI returned HTTP {exc.code}: {detail}") from None
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", None)
+        raise RuntimeError(f"Could not reach RZ AI at {base_url}: {reason or type(exc).__name__}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RuntimeError("RZ AI returned an invalid response") from None
+    reply = payload.get("reply")
+    if not isinstance(reply, str) or not reply.strip():
+        raise RuntimeError("RZ AI response did not contain a reply")
+    return reply.strip()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Chat with MIA / RZ AI from your terminal.")
+    parser.add_argument("-m", "--message", help="Send one message and exit.")
+    parser.add_argument("--url", default=os.getenv("RZ_AI_URL", DEFAULT_URL), help="RZ AI base URL.")
+    parser.add_argument("--model", help="Optional model override.")
+    parser.add_argument("--new-session", action="store_true", help="Start a fresh conversation.")
+    args = parser.parse_args()
+
+    token = os.getenv("RZ_API_TOKEN", "").strip()
+    if not token:
+        print("RZ_API_TOKEN is not set. Create a scoped API token in the RZ AI web UI, then export it in your shell.", file=sys.stderr)
+        return 2
+
+    session = load_session()
+    if args.new_session:
+        import secrets
+        session = secrets.token_urlsafe(12)
+        path = session_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(session + "\n", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+    if args.message:
+        try:
+            print(ask(args.url, token, args.message, session, args.model))
+            return 0
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+    print("MIA · RZ AI terminal client. Type /exit to quit, /new for a fresh conversation.")
+    while True:
+        try:
+            message = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not message:
+            continue
+        if message.lower() in {"/exit", "/quit"}:
+            break
+        if message.lower() == "/new":
+            import secrets
+            session = secrets.token_urlsafe(12)
+            path = session_path()
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_text(session + "\n", encoding="utf-8")
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+            print("Started a new conversation.")
+            continue
+        try:
+            print("MIA> " + ask(args.url, token, message, session, args.model))
+        except RuntimeError as exc:
+            print(f"error> {exc}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
