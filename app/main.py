@@ -1684,3 +1684,12 @@ def capabilities(_current_user: dict = Depends(require_tool_scope("mcp:read"))):
         "integrations": {"github": {"configured": True, "allowed_owner": GITHUB_ALLOWED_OWNER, "read_only": True}},
         "capabilities": cap_services.capabilities(),
     }
+
+
+# Hosted web tool control plane; intentionally separate from the local terminal bridge.
+from app.tools_hub import router as tool_center_router
+app.include_router(tool_center_router)
+
+@app.get("/tools", response_class=HTMLResponse)
+def tool_center_page():
+    return (Path(__file__).parent / "tools_center.html").read_text(encoding="utf-8")
