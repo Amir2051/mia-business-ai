@@ -64,3 +64,15 @@ def test_files_are_scoped_to_authenticated_user(monkeypatch,tmp_path):
     from app.business_documents import _file_row
     assert _file_row('another-user',made['id']) is None
     assert _file_row('local',made['id']) is not None
+
+def test_supported_export_formats_generate_downloadable_files(monkeypatch,tmp_path):
+    import zipfile, io
+    _,client=_client(monkeypatch,tmp_path); h={'X-API-Key':'business-doc-test-key'}
+    for fmt in ('docx','md','json','csv','html'):
+        made=client.post('/v1/business/files',headers=h,json={'title':'Format check','content':'hello format','format':fmt})
+        assert made.status_code==200, (fmt,made.text)
+        response=client.get(made.json()['file']['download_url'],headers=h)
+        assert response.status_code==200 and len(response.content)>0,fmt
+        if fmt=='docx': assert zipfile.is_zipfile(io.BytesIO(response.content))
+        if fmt=='json': assert b'"content"' in response.content
+        if fmt=='html': assert b'<!doctype html>' in response.content
