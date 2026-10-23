@@ -404,7 +404,7 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
         if not match:
             return default
         value = re.sub(r"\*+", "", match.group(1)).strip().strip("[]").strip()
-        if not value or re.search(r"placeholder|not provided|to be filled|your business|^insert\\b|^(?:client name|contact details|address|amount|due date|number|late fee(?: percentage)?|contact email|contact phone(?: number)?|contact information)$", value, re.I):
+        if not value or re.search(r"placeholder|not provided|to be filled|your business|^insert\b|^(?:client name|contact details|address|amount|due date|number|late fee(?: percentage)?|contact email|contact phone(?: number)?|contact information)$", value, re.I):
             return ""
         return value
 
@@ -457,7 +457,7 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
         })
     if not data["items"]:
         # Support common numbered product/service lists from AI-generated proposals.
-        service_block = re.split(r"(?i)Products/Services Included:\s*", plain, maxsplit=1)
+        service_block = re.split(r"(?i)Products/Services Included:\*{0,2}\s*", plain, maxsplit=1)
         if len(service_block) > 1:
             service_block = re.split(r"(?i)Pricing and Payment Terms|Total Amount Due", service_block[1], maxsplit=1)[0]
             matches = list(re.finditer(r"(?m)^\s*\d+\.\s*\*\*([^*]+)\*\*\s*$", service_block))
