@@ -378,10 +378,88 @@ def _invoice_pdf_bytes(title: str, content: str) -> bytes:
     return out.getvalue()
 
 
+
+def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
+    """Recognize an AI-written invoice template and route it through the designed invoice PDF."""
+    plain = content.replace("\\r", "")
+    if not re.search(r"(?im)^\\s*(?:#{1,3}\\s*)?(?:\\*\\*)?Invoice(?:\\*\\*)?\\s*$", plain):
+        return None
+    if not re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services", plain):
+        return None
+
+    def field(pattern: str, default: str = "") -> str:
+        match = re.search(pattern, plain, re.I | re.M)
+        if not match:
+            return default
+        value = re.sub(r"\\*+", "", match.group(1)).strip().strip("[]").strip()
+        if not value or re.search(r"placeholder|not provided|to be filled|your business", value, re.I):
+            return ""
+        return value
+
+    data = {
+        "business_name": field(r"Business Name:\\s*([^\\n]+)", "SafeNestT"),
+        "business_email": field(r"(?:Business )?Email:\\s*([^\\n]+)"),
+        "business_phone": field(r"(?:Business )?Phone:\\s*([^\\n]+)"),
+        "business_address": field(r"(?:Business )?Address:\\s*([^\\n]+)"),
+        "customer_name": field(r"Client Name:\\s*([^\\n]+)"),
+        "customer_email": field(r"Email:\\s*([^\\n]+)"),
+        "customer_phone": field(r"Phone:\\s*([^\\n]+)"),
+        "customer_address": field(r"Address:\\s*([^\\n]+)"),
+        "invoice_number": field(r"Invoice Number:\\s*([^\\n]+)") or "DRAFT",
+        "issue_date": field(r"Invoice Date:\\s*([^\\n]+)") or "Not specified",
+        "due_date": field(r"Due Date:\\s*([^\\n]+)") or "Not specified",
+        "currency": "USD",
+        "items": [],
+        "subtotal": "Pending",
+        "discount": "0.00",
+        "tax_rate": "—",
+        "tax": "Pending",
+        "total": "Pending details",
+        "payment_terms": field(r"Payment due by\\s*([^\\n]+)"),
+        "payment_method": field(r"\\[([^\\]\\n]*(?:bank|payment|transfer)[^\\]\\n]*)\\]"),
+        "additional_notes": field(r"Notes:\\s*([^\\n]+)"),
+    }
+    # Extract service names and details from numbered or bulleted AI invoice templates.
+    sections = re.split(r"(?im)^\\s*(?:\\d+\\.\\s*)?\\*\\*Service\\s+\\d+\\s*:\\s*", plain)
+    for section in sections[1:]:
+        name_match = re.match(r"([^*\\n]+)\\*\\*?", section)
+        if not name_match:
+            continue
+        name = name_match.group(1).strip().rstrip(":")
+        detail_match = re.search(r"(?im)^\\s*[-*]?\\s*\\*\\*Details:\\*\\*\\s*([^\\n]+)", section)
+        quantity_match = re.search(r"(?im)^\\s*[-*]?\\s*\\*\\*(?:Hours/Units|Quantity|Qty):\\*\\*\\s*([^\\n]+)", section)
+        rate_match = re.search(r"(?im)^\\s*[-*]?\\s*\\*\\*Rate:\\*\\*\\s*([^\\n]+)", section)
+        detail = (detail_match.group(1).strip() if detail_match else "")
+        item_description = name + (": " + detail if detail and not re.search(r"placeholder", detail, re.I) else "")
+        quantity = (quantity_match.group(1).strip() if quantity_match else "")
+        rate = (rate_match.group(1).strip() if rate_match else "")
+        for value in (quantity, rate):
+            if re.search(r"placeholder|^\\[?\\s*\\]?$", value, re.I):
+                if value == quantity: quantity = ""
+                if value == rate: rate = ""
+        data["items"].append({
+            "description": item_description,
+            "quantity": quantity or "—",
+            "unit_price": rate.replace("$", "").strip() or "—",
+            "amount": "—",
+        })
+    if not data["items"]:
+        # Some models render service names as bold bullets rather than numbered sections.
+        for match in re.finditer(r"(?im)^\\s*[-*]\\s*\\*\\*([^*]+)\\*\\*\\s*$", plain):
+            name = match.group(1).strip()
+            if name.lower() not in {"invoice to:", "invoice from:", "description of services"}:
+                data["items"].append({"description": name, "quantity": "—", "unit_price": "—", "amount": "—"})
+    if not data["items"]:
+        return None
+    data["additional_notes"] = data["additional_notes"] or "Draft invoice — complete all missing client, billing, and service details before sending."
+    return content.split("\\n<!--MIA_INVOICE_DATA:", 1)[0] + "\\n<!--MIA_INVOICE_DATA:" + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "-->"
+
 def _render(title: str, content: str, fmt: str) -> tuple[bytes,str]:
     if fmt not in FORMATS: raise HTTPException(status_code=422, detail=f"Unsupported format. Choose: {', '.join(sorted(FORMATS))}")
     if fmt == "pdf":
         if "<!--MIA_INVOICE_DATA:" in content: return _invoice_pdf_bytes(title, content), MIME[fmt]
+        structured_invoice = _invoice_markdown_as_structured(title, content)
+        if structured_invoice: return _invoice_pdf_bytes(title, structured_invoice), MIME[fmt]
         return _pdf_bytes(title, content), MIME[fmt]
     if fmt == "docx":
         try: from docx import Document
