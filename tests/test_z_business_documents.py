@@ -76,3 +76,58 @@ def test_supported_export_formats_generate_downloadable_files(monkeypatch,tmp_pa
         if fmt=='docx': assert zipfile.is_zipfile(io.BytesIO(response.content))
         if fmt=='json': assert b'"content"' in response.content
         if fmt=='html': assert b'<!doctype html>' in response.content
+
+def test_business_profile_requires_auth_and_persists_per_user(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    assert client.get('/v1/business/profile').status_code == 401
+    h = {'X-API-Key': 'business-doc-test-key'}
+    profile = {
+        'business_name': 'Northstar Studio',
+        'industry': 'Consulting',
+        'target_customers': 'Solo founders and small teams',
+        'offer': 'Operations consulting and automation',
+        'goals': 'Win five paying customers this quarter',
+        'brand_voice': 'Clear, premium, trustworthy',
+        'constraints': 'No unverified claims; ask before external actions',
+    }
+    saved = client.put('/v1/business/profile', headers=h, json=profile)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['saved'] is True
+    assert client.get('/v1/business/profile', headers=h).json()['profile']['business_name'] == 'Northstar Studio'
+    from app.business_documents import get_business_profile
+    assert get_business_profile('another-user')['business_name'] == ''
+    assert get_business_profile('local')['constraints'] == profile['constraints']
+
+
+def test_chat_uses_saved_business_profile_as_reference_context(monkeypatch, tmp_path):
+    module, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    saved = client.put('/v1/business/profile', headers=h, json={
+        'business_name': 'Northstar Studio', 'industry': 'Consulting',
+        'target_customers': 'Independent consultants',
+    })
+    assert saved.status_code == 200, saved.text
+    captured = {}
+    def fake_complete_message(**kwargs):
+        captured.update(kwargs)
+        return {'reply': 'ok', 'session_id': kwargs['session_id'], 'provider': 'test'}
+    monkeypatch.setattr(module, '_complete_message', fake_complete_message)
+    response = client.post('/v1/chat', headers=h, json={'message': 'Help me find customers'})
+    assert response.status_code == 200, response.text
+    assert 'USER-PROVIDED BUSINESS PROFILE' in captured['system']
+    assert 'Business name: Northstar Studio' in captured['system']
+    assert 'Target customers: Independent consultants' in captured['system']
+
+
+def test_capability_database_default_is_isolated_from_original_rz_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('RZ_LOCAL_DATA_PATH', raising=False)
+    monkeypatch.setenv('DATABASE_URL', '')
+    from app import capabilities
+    conn, kind = capabilities._db()
+    try:
+        path = conn.execute('PRAGMA database_list').fetchone()[2]
+    finally:
+        conn.close()
+    assert kind == 'sqlite'
+    assert Path(path) == tmp_path / '.mia-business-ai' / 'capabilities.sqlite3'

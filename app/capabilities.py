@@ -276,7 +276,7 @@ def _db():
             approval TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at DOUBLE PRECISION NOT NULL,
             updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id, job_id))''')
         return conn, 'postgres'
-    path = os.getenv('RZ_LOCAL_DATA_PATH', str(Path.home() / '.rz-ai-agent' / 'capabilities.sqlite3'))
+    path = os.getenv('RZ_LOCAL_DATA_PATH', str(Path.home() / '.mia-business-ai' / 'capabilities.sqlite3'))
     Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(Path(path).expanduser()), timeout=5)
     conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_memory (

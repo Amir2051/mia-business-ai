@@ -27,6 +27,12 @@ def _db():
       user_id TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL,
       format TEXT NOT NULL, content TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'document',
       created_at REAL NOT NULL, PRIMARY KEY(user_id,file_id))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS business_profiles(
+      user_id TEXT PRIMARY KEY, business_name TEXT NOT NULL DEFAULT '',
+      industry TEXT NOT NULL DEFAULT '', target_customers TEXT NOT NULL DEFAULT '',
+      offer TEXT NOT NULL DEFAULT '', goals TEXT NOT NULL DEFAULT '',
+      brand_voice TEXT NOT NULL DEFAULT '', constraints TEXT NOT NULL DEFAULT '',
+      updated_at REAL NOT NULL)""")
     conn.commit()
     return conn
 
@@ -34,6 +40,30 @@ class FileCreate(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     content: str = Field(min_length=1, max_length=MAX_CONTENT)
     format: str = Field(default="pdf", max_length=8)
+
+class BusinessProfile(BaseModel):
+    business_name: str = Field(default="", max_length=180)
+    industry: str = Field(default="", max_length=180)
+    target_customers: str = Field(default="", max_length=500)
+    offer: str = Field(default="", max_length=1000)
+    goals: str = Field(default="", max_length=1500)
+    brand_voice: str = Field(default="", max_length=500)
+    constraints: str = Field(default="", max_length=1000)
+
+
+def get_business_profile(user_id: str) -> dict:
+    """Return one user's business profile from the clone's dedicated business store."""
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT business_name,industry,target_customers,offer,goals,brand_voice,constraints,updated_at FROM business_profiles WHERE user_id=?",
+            (str(user_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    keys = ("business_name", "industry", "target_customers", "offer", "goals", "brand_voice", "constraints", "updated_at")
+    return dict(zip(keys, row)) if row else {**{k: "" for k in keys[:-1]}, "updated_at": None}
+
 
 class InvoiceItem(BaseModel):
     description: str = Field(min_length=1, max_length=300)
@@ -121,6 +151,27 @@ def _file_row(user_id: str, fid: str):
 
 def create_router(auth_dependency):
     router=APIRouter(prefix="/v1/business",tags=["MIA Business Documents"])
+    @router.get("/profile")
+    def read_business_profile(user:dict=Depends(auth_dependency)):
+        return {"profile": get_business_profile(str(user["id"]))}
+
+    @router.put("/profile")
+    def save_business_profile(payload:BusinessProfile,user:dict=Depends(auth_dependency)):
+        uid = str(user["id"])
+        values = {k: getattr(payload, k).strip() for k in ("business_name", "industry", "target_customers", "offer", "goals", "brand_voice", "constraints")}
+        now = time.time()
+        conn = _db()
+        try:
+            conn.execute("""INSERT INTO business_profiles(user_id,business_name,industry,target_customers,offer,goals,brand_voice,constraints,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET
+                business_name=excluded.business_name,industry=excluded.industry,target_customers=excluded.target_customers,
+                offer=excluded.offer,goals=excluded.goals,brand_voice=excluded.brand_voice,constraints=excluded.constraints,updated_at=excluded.updated_at""",
+                (uid, values["business_name"], values["industry"], values["target_customers"], values["offer"], values["goals"], values["brand_voice"], values["constraints"], now))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"profile": {**values, "updated_at": now}, "saved": True}
+
     @router.get("/files")
     def list_files(user:dict=Depends(auth_dependency)):
         conn=_db()
