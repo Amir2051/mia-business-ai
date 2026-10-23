@@ -186,6 +186,22 @@ button:hover:not(:disabled){box-shadow:0 0 22px #a78bfa30,0 0 12px #63e7ff18}
   <div class="biz-foot"><span id="growthStatus" role="status">Your plans are saved per account and date.</span><button type="button" class="biz-link" id="growthRefresh">Refresh history ↻</button></div>
   <div class="biz-card-head" style="margin-top:18px"><h3>Recent growth plans</h3><span>Up to 14 recent days</span></div><div class="biz-list" id="growthHistory"><div class="biz-empty">No saved plans yet. Generate your first daily plan.</div></div>
  </section>
+ <section class="biz-card" id="miaWebsiteIntelligence" style="margin-top:12px">
+  <div class="biz-card-head"><h3>Teach MIA your business from its website</h3><span>Discover · review · personalize</span></div>
+  <p class="biz-subtitle" style="margin:0 0 14px">Enter your public website. MIA crawls a bounded set of pages, extracts business details, and waits for your approval before updating your profile.</p>
+  <form id="miaWebsiteScanForm" class="biz-form">
+   <label for="miaWebsiteDomain">Business website</label>
+   <div class="biz-row"><input id="miaWebsiteDomain" type="url" placeholder="https://yourbusiness.com" required maxlength="2000" style="flex:1;min-width:220px"><button id="miaWebsiteScanButton" type="submit">Scan website</button></div>
+   <div class="biz-foot"><span id="miaWebsiteScanStatus" role="status">Public pages only. Website content is not trusted automatically.</span><span>Up to 10 pages per scan</span></div>
+  </form>
+  <div id="miaWebsiteReview" hidden style="margin-top:16px">
+   <div class="biz-card-head"><h3>Review extracted business details</h3><span id="miaWebsitePageCount"></span></div>
+   <p class="biz-subtitle">Check suggestions before saving. Blank extracted fields leave existing profile values unchanged.</p>
+   <div id="miaWebsiteSuggestions" class="biz-list"></div>
+   <div class="biz-card-head" style="margin-top:14px"><h4>Pages MIA read</h4></div><div id="miaWebsiteSources" class="biz-list"></div>
+   <div class="biz-foot"><span id="miaWebsiteApproveStatus" role="status">No changes have been saved yet.</span><button id="miaWebsiteApproveButton" type="button">Approve and update profile</button></div>
+  </div>
+ </section>
  <section class="biz-card" id="miaOperationsEngine" style="margin-top:12px">
   <div class="biz-card-head"><h3>Daily operations engine</h3><span>Plan · approve · verify</span></div>
   <p class="biz-subtitle" style="margin:0 0 14px">Turn a recurring business routine into an auditable workflow. MIA records explicit approval, step status, and verification evidence. External actions are not claimed or sent unless a supported integration actually performs them.</p>
@@ -523,5 +539,28 @@ $('newChat').onclick=()=>{sessionId=null;$('messages').replaceChildren();const e
  async function load(){host.textContent='Loading workflows…';try{const d=await api('/v1/business/workflows?limit=30');draw(d.workflows||[]);if(!$('opsWorkflowStatus').textContent||$('opsWorkflowStatus').textContent==='No workflow created in this session yet.')$('opsWorkflowStatus').textContent='Loaded '+(d.count||0)+' workflow(s).'}catch(e){host.textContent='Could not load workflows: '+e.message;$('opsWorkflowStatus').textContent='Connect your account, then refresh.'}}
  $('opsCreateWorkflow').onclick=async()=>{const title=$('opsWorkflowTitle').value.trim(),goal=$('opsWorkflowGoal').value.trim(),lines=$('opsWorkflowSteps').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);if(!title||!goal||!lines.length){$('opsWorkflowStatus').textContent='Add a routine name, desired outcome, and at least one step.';return}if(lines.length>20){$('opsWorkflowStatus').textContent='Keep a workflow to 20 steps or fewer.';return}const b=$('opsCreateWorkflow');b.disabled=true;try{await api('/v1/business/workflows',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,goal,steps:lines.map((title,i)=>({title,action_type:/remind|email|send|contact|notify/i.test(title)?'external_action':'prepare',description:/remind|email|send|contact|notify/i.test(title)?'External action: prepare and review; sending requires a configured, approved integration.':'Review and record the result before marking complete.'}))})});$('opsWorkflowTitle').value='';$('opsWorkflowGoal').value='';$('opsWorkflowSteps').value='';$('opsWorkflowStatus').textContent='Draft created. Review the steps and approve the workflow before tracking execution.';await load()}catch(e){$('opsWorkflowStatus').textContent='Could not create workflow: '+e.message}finally{b.disabled=false}};
  $('opsRefreshWorkflows').onclick=load;window.miaLoadWorkflows=load;load();
+
+ // Website intelligence: public-site claims remain reviewable until owner approval.
+ let websiteScanId=null;
+ const websiteFields=[['business_name','Business name'],['industry','Industry'],['target_customers','Target customers'],['offer','Services / offer'],['brand_voice','Brand voice']];
+ $('miaWebsiteScanForm').addEventListener('submit',async e=>{
+  e.preventDefault();const domain=$('miaWebsiteDomain').value.trim(),button=$('miaWebsiteScanButton');if(!domain)return;
+  button.disabled=true;$('miaWebsiteReview').hidden=true;$('miaWebsiteScanStatus').textContent='Crawling public pages…';
+  try{
+   const result=await api('/v1/business/website/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,max_pages:10})});
+   websiteScanId=result.scan_id;$('miaWebsitePageCount').textContent=result.pages_crawled+' pages';
+   const suggestions=$('miaWebsiteSuggestions');suggestions.replaceChildren();
+   websiteFields.forEach(([key,label])=>{const row=document.createElement('div');row.className='biz-list-item';const h=document.createElement('strong');h.textContent=label;const v=document.createElement('p');v.textContent=result.profile_suggestions?.[key]||'Not found on readable pages';row.append(h,v);suggestions.append(row)});
+   const sources=$('miaWebsiteSources');sources.replaceChildren();
+   (result.sources||[]).forEach(item=>{const row=document.createElement('div');row.className='biz-list-item';const a=document.createElement('a');a.href=item.url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=item.title||item.url;const url=document.createElement('small');url.textContent=item.url;row.append(a,url);sources.append(row)});
+   $('miaWebsiteScanStatus').textContent=(result.warnings?.length?result.warnings.length+' page(s) could not be read. ':'')+'Review suggestions before approval.';
+   $('miaWebsiteApproveStatus').textContent='No profile changes saved yet.';$('miaWebsiteReview').hidden=false;
+  }catch(err){$('miaWebsiteScanStatus').textContent='Website scan failed: '+err.message}finally{button.disabled=false}
+ });
+ $('miaWebsiteApproveButton').addEventListener('click',async()=>{
+  if(!websiteScanId)return;const button=$('miaWebsiteApproveButton');button.disabled=true;$('miaWebsiteApproveStatus').textContent='Saving approved details…';
+  try{await api('/v1/business/website/scans/'+websiteScanId+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fields:websiteFields.map(x=>x[0])})});$('miaWebsiteApproveStatus').textContent='Approved. MIA’s business profile has been updated.';if(window.miaLoadBusinessProfile)await window.miaLoadBusinessProfile()}
+  catch(err){$('miaWebsiteApproveStatus').textContent='Could not save profile: '+err.message}finally{button.disabled=false}
+ });
 })();
 </script></body></html>
