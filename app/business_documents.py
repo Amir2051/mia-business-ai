@@ -16,9 +16,61 @@ MAX_CONTENT = 200_000
 FORMATS = {"pdf", "docx", "txt", "md", "csv", "json", "html"}
 MIME = {"pdf":"application/pdf", "docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "txt":"text/plain; charset=utf-8", "md":"text/markdown; charset=utf-8", "csv":"text/csv; charset=utf-8", "json":"application/json; charset=utf-8", "html":"text/html; charset=utf-8"}
 
+class _PostgresCompatConnection:
+    """Small adapter so this module can keep SQLite placeholders locally.
+
+    PostgreSQL is selected only when this clone's own DATABASE_URL is set.
+    Never point it at the original RZ Agent or SafeNestT database.
+    """
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, sql, params=()):
+        return self._connection.execute(sql.replace("?", "%s"), params)
+
+    def commit(self):
+        return self._connection.commit()
+
+    def close(self):
+        return self._connection.close()
+
+
 def _db():
-    # Deliberately do not use DATABASE_URL: this clone must not inherit the
-    # original app's database accidentally. Production can provision its own path.
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if dsn:
+        import psycopg
+        conn = _PostgresCompatConnection(psycopg.connect(dsn, connect_timeout=5))
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS business_files(
+              user_id TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL,
+              format TEXT NOT NULL, content TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'document',
+              created_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,file_id))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS business_profiles(
+              user_id TEXT PRIMARY KEY, business_name TEXT NOT NULL DEFAULT '',
+              industry TEXT NOT NULL DEFAULT '', target_customers TEXT NOT NULL DEFAULT '',
+              offer TEXT NOT NULL DEFAULT '', goals TEXT NOT NULL DEFAULT '',
+              brand_voice TEXT NOT NULL DEFAULT '', constraints TEXT NOT NULL DEFAULT '',
+              updated_at DOUBLE PRECISION NOT NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS business_clients(
+              user_id TEXT NOT NULL, client_id TEXT NOT NULL, name TEXT NOT NULL,
+              company TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+              stage TEXT NOT NULL, expected_value TEXT NOT NULL DEFAULT '0', next_follow_up TEXT NOT NULL DEFAULT '',
+              notes TEXT NOT NULL DEFAULT '', created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
+              PRIMARY KEY(user_id,client_id))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS business_growth_plans(
+              user_id TEXT NOT NULL, plan_date TEXT NOT NULL, primary_goal TEXT NOT NULL,
+              hours_available INTEGER NOT NULL, success_metric TEXT NOT NULL DEFAULT '',
+              plan_text TEXT NOT NULL, reflection TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'active', created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
+              PRIMARY KEY(user_id,plan_date))""")
+            conn.commit()
+            return conn
+        except Exception:
+            conn.close()
+            raise
+
+    # Local development fallback only. Hosted SQLite is not durable on an
+    # ephemeral filesystem; configure this clone's dedicated PostgreSQL URL.
     path = Path(os.getenv("MIA_BUSINESS_DATA_PATH", str(Path.home()/".mia-business-ai"/"business.sqlite3"))).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=10)

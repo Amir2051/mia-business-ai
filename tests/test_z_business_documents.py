@@ -208,3 +208,24 @@ def test_growth_plan_validates_date_goal_hours_and_length(monkeypatch, tmp_path)
     assert client.post('/v1/business/growth-plans', headers=h, json={**base, 'plan_date':'2026-10-22', 'hours_available': 99}).status_code == 422
     assert client.post('/v1/business/growth-plans', headers=h, json={**base, 'plan_date':'2026-10-22', 'primary_goal':'   '}).status_code == 422
     assert client.get('/v1/business/growth-plans?limit=0', headers=h).status_code == 422
+
+def test_postgres_compat_connection_translates_sqlite_placeholders():
+    from app.business_documents import _PostgresCompatConnection
+
+    class FakeConnection:
+        def __init__(self):
+            self.call = None
+        def execute(self, sql, params):
+            self.call = (sql, params)
+            return 'cursor'
+        def commit(self):
+            return 'committed'
+        def close(self):
+            return 'closed'
+
+    raw = FakeConnection()
+    conn = _PostgresCompatConnection(raw)
+    assert conn.execute('SELECT * FROM t WHERE a=? AND b=? LIMIT ?', ('x', 'y', 5)) == 'cursor'
+    assert raw.call == ('SELECT * FROM t WHERE a=%s AND b=%s LIMIT %s', ('x', 'y', 5))
+    assert conn.commit() == 'committed'
+    assert conn.close() == 'closed'
