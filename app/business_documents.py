@@ -346,8 +346,13 @@ def _invoice_pdf_bytes(title: str, content: str) -> bytes:
         billbox=Table([[customer]],colWidths=[3.45*inch]);billbox.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),pale),("BOX",(0,0),(-1,-1),.5,line),("LEFTPADDING",(0,0),(-1,-1),10),("RIGHTPADDING",(0,0),(-1,-1),10),("TOPPADDING",(0,0),(-1,-1),9),("BOTTOMPADDING",(0,0),(-1,-1),9)]));story += [billbox,Spacer(1,18)]
     item_rows=[[P("DESCRIPTION","InvoiceWhite"),P("QTY","InvoiceWhite"),P("UNIT PRICE","InvoiceWhite"),P("TOTAL","InvoiceWhite")]]
     currency=str(data.get("currency") or "USD")
+    def money(value):
+        try:
+            return currency+" "+format(Decimal(str(value)).quantize(Decimal("0.01")), "f")
+        except (InvalidOperation, ValueError, TypeError):
+            return str(value or "—")
     for item in data.get("items",[]):
-        item_rows.append([P(item.get("description")),P(item.get("quantity"),"InvoiceCellRight"),P(currency+" "+str(item.get("unit_price")),"InvoiceCellRight"),P(currency+" "+str(item.get("amount")),"InvoiceCellRight")])
+        item_rows.append([P(item.get("description")),P(item.get("quantity"),"InvoiceCellRight"),P(money(item.get("unit_price")),"InvoiceCellRight"),P(money(item.get("amount")),"InvoiceCellRight")])
     items_table=Table(item_rows,colWidths=[3.5*inch,.65*inch,1.25*inch,1.25*inch],repeatRows=1,hAlign="LEFT")
     items_table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),navy),("VALIGN",(0,0),(-1,-1),"TOP"),("GRID",(0,0),(-1,-1),.35,line),("LEFTPADDING",(0,0),(-1,-1),7),("RIGHTPADDING",(0,0),(-1,-1),7),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,pale])]))
     story += [items_table,Spacer(1,10)]
@@ -355,7 +360,7 @@ def _invoice_pdf_bytes(title: str, content: str) -> bytes:
     for label,key in (("Subtotal","subtotal"),("Discount","discount"),("Tax ("+str(data.get("tax_rate",0))+"%)","tax"),("TOTAL AMOUNT DUE","total")):
         if label=="Discount" and Decimal(str(data.get(key,"0")))==0: continue
         style="InvoiceWhite" if key=="total" else "InvoiceCellRight"
-        totals.append([P(label,style if key=="total" else "InvoiceCell"),P(currency+" "+str(data.get(key,"0.00")),style)])
+        totals.append([P(label,style if key=="total" else "InvoiceCell"),P(money(data.get(key,"0.00")),style)])
     total_table=Table(totals,colWidths=[1.8*inch,1.45*inch],hAlign="RIGHT")
     total_table.setStyle(TableStyle([("ALIGN",(1,0),(-1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),navy),("LINEABOVE",(0,0),(-1,-2),.4,line),("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))
     story += [total_table,Spacer(1,18)]
