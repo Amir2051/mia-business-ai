@@ -394,9 +394,9 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
     if not re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services|Client Information|Products/Services Included", plain):
         return None
 
-    invoice_to = re.split(r"(?i)Invoice To:\\s*", plain, maxsplit=1)[-1]
+    invoice_to = re.split(r"(?i)Invoice To:\s*", plain, maxsplit=1)[-1]
     invoice_to = re.split(r"(?i)Invoice From:|Invoice Number:", invoice_to, maxsplit=1)[0]
-    invoice_from = re.split(r"(?i)Invoice From:\\s*", plain, maxsplit=1)[-1]
+    invoice_from = re.split(r"(?i)Invoice From:\s*", plain, maxsplit=1)[-1]
     invoice_from = re.split(r"(?i)Invoice Number:|Description of Services", invoice_from, maxsplit=1)[0]
 
     def field(pattern: str, default: str = "", source: str = plain) -> str:
@@ -457,20 +457,20 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
         })
     if not data["items"]:
         # Support common numbered product/service lists from AI-generated proposals.
-        service_block = re.split(r"(?i)Products/Services Included:\\s*", plain, maxsplit=1)
+        service_block = re.split(r"(?i)Products/Services Included:\s*", plain, maxsplit=1)
         if len(service_block) > 1:
             service_block = re.split(r"(?i)Pricing and Payment Terms|Total Amount Due", service_block[1], maxsplit=1)[0]
-            matches = list(re.finditer(r"(?m)^\\s*\\d+\\.\\s*\\*\\*([^*]+)\\*\\*\\s*$", service_block))
+            matches = list(re.finditer(r"(?m)^\s*\d+\.\s*\*\*([^*]+)\*\*\s*$", service_block))
             for i, match in enumerate(matches):
                 end = matches[i + 1].start() if i + 1 < len(matches) else len(service_block)
                 tail = service_block[match.end():end]
-                desc_match = re.search(r"(?m)^\\s*[-*]\\s*(.+)$", tail)
+                desc_match = re.search(r"(?m)^\s*[-*]\s*(.+)$", tail)
                 name = match.group(1).strip()
                 description = name + (": " + desc_match.group(1).strip() if desc_match else "")
                 data["items"].append({"description": description, "quantity": "—", "unit_price": "—", "amount": "—"})
     if not data["items"]:
         # Some models render service names as bold bullets rather than numbered sections.
-        for match in re.finditer(r"(?im)^\\s*[-*]\\s*\\*\\*([^*]+)\\*\\*\\s*$", plain):
+        for match in re.finditer(r"(?im)^\s*[-*]\s*\*\*([^*]+)\*\*\s*$", plain):
             name = match.group(1).strip()
             if name.lower() not in {"invoice to:", "invoice from:", "description of services"}:
                 data["items"].append({"description": name, "quantity": "—", "unit_price": "—", "amount": "—"})
@@ -479,17 +479,17 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
     # Keep important proposal terms instead of dropping them when routing to the designed layout.
     extra_sections = []
     for heading in ("Payment Terms:", "Terms and Conditions", "Next Steps", "Attachments:"):
-        match = re.search(r"(?im)^\\s*\\*{0,2}" + re.escape(heading) + r"\\*{0,2}\\s*$", plain)
+        match = re.search(r"(?im)^\s*\*{0,2}" + re.escape(heading) + r"\*{0,2}\s*$", plain)
         if match:
             following = plain[match.end():]
-            next_heading = re.search(r"(?im)^\\s*(?:---|\\*{0,2}(?:Terms and Conditions|Next Steps|Contact Information|Attachments:)\\*{0,2})\\s*$", following)
+            next_heading = re.search(r"(?im)^\s*(?:---|\*{0,2}(?:Terms and Conditions|Next Steps|Contact Information|Attachments:)\*{0,2})\s*$", following)
             section = following[:next_heading.start()] if next_heading else following[:700]
-            cleaned = re.sub(r"\\*{1,2}", "", section).strip(" -\\n")
-            if cleaned and not re.search(r"placeholder|\\[Insert Date\\]", cleaned, re.I):
-                extra_sections.append(heading.rstrip(":") + ": " + re.sub(r"\\s+", " ", cleaned))
+            cleaned = re.sub(r"\*{1,2}", "", section).strip(" -\n")
+            if cleaned and not re.search(r"placeholder|\[Insert Date\]", cleaned, re.I):
+                extra_sections.append(heading.rstrip(":") + ": " + re.sub(r"\s+", " ", cleaned))
     data["additional_notes"] = data["additional_notes"] or "Draft invoice — complete all missing client, billing, and service details before sending."
     if extra_sections:
-        data["additional_notes"] += "\\n\\n" + "\\n".join(extra_sections)
+        data["additional_notes"] += "\n\n" + "\n".join(extra_sections)
     return content.split("\n<!--MIA_INVOICE_DATA:", 1)[0] + "\n<!--MIA_INVOICE_DATA:" + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "-->"
 
 def _render(title: str, content: str, fmt: str) -> tuple[bytes,str]:
