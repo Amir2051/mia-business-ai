@@ -67,6 +67,12 @@ def _db():
               user_id TEXT NOT NULL, activity_id TEXT NOT NULL, client_id TEXT NOT NULL,
               activity_type TEXT NOT NULL, summary TEXT NOT NULL, next_step TEXT NOT NULL DEFAULT '',
               created_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,activity_id))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS business_workflows(
+              user_id TEXT NOT NULL, workflow_id TEXT NOT NULL, title TEXT NOT NULL,
+              goal TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
+              approval_status TEXT NOT NULL DEFAULT 'pending', steps_json TEXT NOT NULL,
+              audit_json TEXT NOT NULL DEFAULT '[]', created_at DOUBLE PRECISION NOT NULL,
+              updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,workflow_id))""")
             conn.commit()
             return conn
         except Exception:
@@ -105,6 +111,12 @@ def _db():
       user_id TEXT NOT NULL, activity_id TEXT NOT NULL, client_id TEXT NOT NULL,
       activity_type TEXT NOT NULL, summary TEXT NOT NULL, next_step TEXT NOT NULL DEFAULT '',
       created_at REAL NOT NULL, PRIMARY KEY(user_id,activity_id))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS business_workflows(
+      user_id TEXT NOT NULL, workflow_id TEXT NOT NULL, title TEXT NOT NULL,
+      goal TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
+      approval_status TEXT NOT NULL DEFAULT 'pending', steps_json TEXT NOT NULL,
+      audit_json TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL,
+      updated_at REAL NOT NULL, PRIMARY KEY(user_id,workflow_id))""")
     conn.commit()
     return conn
 
@@ -174,6 +186,20 @@ class ClientActivityCreate(BaseModel):
     activity_type: Literal["call", "email", "meeting", "proposal", "note"] = "note"
     summary: str = Field(min_length=1, max_length=1500)
     next_step: str = Field(default="", max_length=500)
+
+class WorkflowStepCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    action_type: Literal["prepare", "internal_update", "external_action"] = "prepare"
+    description: str = Field(default="", max_length=1500)
+
+class WorkflowCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+    goal: str = Field(min_length=1, max_length=1200)
+    steps: list[WorkflowStepCreate] = Field(min_length=1, max_length=20)
+
+class WorkflowStepUpdate(BaseModel):
+    status: Literal["in_progress", "completed", "blocked", "pending"]
+    evidence: str = Field(default="", max_length=2000)
 
 
 class InvoiceItem(BaseModel):
@@ -260,6 +286,12 @@ def _file_row(user_id: str, fid: str):
     finally: conn.close()
     return row
 
+def _workflow_dict(row):
+    return {"id": row[0], "title": row[1], "goal": row[2], "status": row[3],
+            "approval_status": row[4], "steps": json.loads(row[5]), "audit": json.loads(row[6]),
+            "created_at": row[7], "updated_at": row[8]}
+
+
 def create_router(auth_dependency):
     router=APIRouter(prefix="/v1/business",tags=["MIA Business Documents"])
 
@@ -311,6 +343,89 @@ def create_router(auth_dependency):
             "growth_plans_completed": int(plans[1] or 0),
             "followups": [{"id": r[0], "name": r[1], "company": r[2], "stage": r[3], "expected_value": str(r[4] or "0"), "next_follow_up": r[5]} for r in followups[:8]],
         }
+
+    @router.get("/workflows")
+    def list_business_workflows(limit: int = 20, user: dict = Depends(auth_dependency)):
+        if not 1 <= limit <= 50:
+            raise HTTPException(status_code=422, detail="limit must be from 1 to 50")
+        conn = _db()
+        try:
+            rows = conn.execute("SELECT workflow_id,title,goal,status,approval_status,steps_json,audit_json,created_at,updated_at FROM business_workflows WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (str(user["id"]), limit)).fetchall()
+        finally:
+            conn.close()
+        return {"workflows": [_workflow_dict(row) for row in rows], "count": len(rows)}
+
+    @router.post("/workflows")
+    def create_business_workflow(payload: WorkflowCreate, user: dict = Depends(auth_dependency)):
+        title, goal = payload.title.strip(), payload.goal.strip()
+        if not title or not goal:
+            raise HTTPException(status_code=422, detail="Workflow title and goal cannot be blank")
+        steps = [{"index": i, "title": item.title.strip(), "action_type": item.action_type,
+                  "description": item.description.strip(), "status": "pending", "evidence": ""}
+                 for i, item in enumerate(payload.steps)]
+        if any(not step["title"] for step in steps):
+            raise HTTPException(status_code=422, detail="Workflow step titles cannot be blank")
+        wid, now = uuid.uuid4().hex, time.time()
+        audit = [{"at": now, "event": "workflow_created", "detail": "Draft created; no actions executed."}]
+        conn = _db()
+        try:
+            conn.execute("INSERT INTO business_workflows(user_id,workflow_id,title,goal,status,approval_status,steps_json,audit_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                         (str(user["id"]), wid, title, goal, "draft", "pending", json.dumps(steps), json.dumps(audit), now, now))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"workflow": {"id": wid, "title": title, "goal": goal, "status": "draft", "approval_status": "pending", "steps": steps, "audit": audit, "created_at": now, "updated_at": now}}
+
+    @router.post("/workflows/{workflow_id}/approve")
+    def approve_business_workflow(workflow_id: str, user: dict = Depends(auth_dependency)):
+        if not re.fullmatch(r"[a-f0-9]{32}", workflow_id):
+            raise HTTPException(status_code=400, detail="Invalid workflow id")
+        uid, now, conn = str(user["id"]), time.time(), _db()
+        try:
+            row = conn.execute("SELECT title,goal,status,approval_status,steps_json,audit_json,created_at FROM business_workflows WHERE user_id=? AND workflow_id=?", (uid, workflow_id)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+            if row[3] == "approved":
+                return {"workflow": {"id": workflow_id, "title": row[0], "goal": row[1], "status": row[2], "approval_status": row[3], "steps": json.loads(row[4]), "audit": json.loads(row[5]), "created_at": row[6], "updated_at": now}, "already_approved": True}
+            if row[3] != "pending" or row[2] != "draft":
+                raise HTTPException(status_code=409, detail="Only a pending draft can be approved")
+            steps, audit = json.loads(row[4]), json.loads(row[5])
+            audit.append({"at": now, "event": "workflow_approved", "detail": "Owner explicitly approved this workflow plan."})
+            conn.execute("UPDATE business_workflows SET status='approved',approval_status='approved',audit_json=?,updated_at=? WHERE user_id=? AND workflow_id=?", (json.dumps(audit), now, uid, workflow_id)); conn.commit()
+            result = {"id": workflow_id, "title": row[0], "goal": row[1], "status": "approved", "approval_status": "approved", "steps": steps, "audit": audit, "created_at": row[6], "updated_at": now}
+        finally:
+            conn.close()
+        return {"workflow": result, "note": "Approval authorizes this workflow plan, but does not claim an external integration action has run. Each step requires a verified result."}
+
+    @router.patch("/workflows/{workflow_id}/steps/{step_index}")
+    def update_business_workflow_step(workflow_id: str, step_index: int, payload: WorkflowStepUpdate, user: dict = Depends(auth_dependency)):
+        if not re.fullmatch(r"[a-f0-9]{32}", workflow_id):
+            raise HTTPException(status_code=400, detail="Invalid workflow id")
+        uid, now, conn = str(user["id"]), time.time(), _db()
+        try:
+            row = conn.execute("SELECT title,goal,status,approval_status,steps_json,audit_json,created_at FROM business_workflows WHERE user_id=? AND workflow_id=?", (uid, workflow_id)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+            if row[3] != "approved":
+                raise HTTPException(status_code=409, detail="Approve the workflow before updating steps")
+            steps, audit = json.loads(row[4]), json.loads(row[5])
+            if not 0 <= step_index < len(steps):
+                raise HTTPException(status_code=404, detail="Workflow step not found")
+            evidence = payload.evidence.strip()
+            if payload.status == "completed" and not evidence:
+                raise HTTPException(status_code=422, detail="Completed steps require verification evidence")
+            step = steps[step_index]
+            step["status"], step["evidence"] = payload.status, evidence
+            audit.append({"at": now, "event": "step_" + payload.status, "step_index": step_index, "detail": evidence or "Status updated without completion claim."})
+            all_done = all(item["status"] == "completed" for item in steps)
+            any_active = any(item["status"] == "in_progress" for item in steps)
+            any_blocked = any(item["status"] == "blocked" for item in steps)
+            status = "completed" if all_done else "blocked" if any_blocked and not any_active else "in_progress" if any_active or any(item["status"] == "completed" for item in steps) else "approved"
+            conn.execute("UPDATE business_workflows SET status=?,steps_json=?,audit_json=?,updated_at=? WHERE user_id=? AND workflow_id=?", (status, json.dumps(steps), json.dumps(audit), now, uid, workflow_id)); conn.commit()
+            result = {"id": workflow_id, "title": row[0], "goal": row[1], "status": status, "approval_status": row[3], "steps": steps, "audit": audit, "created_at": row[6], "updated_at": now}
+        finally:
+            conn.close()
+        return {"workflow": result}
 
     @router.get("/profile")
     def read_business_profile(user:dict=Depends(auth_dependency)):

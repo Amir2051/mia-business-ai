@@ -323,3 +323,43 @@ def test_business_overview_win_rate_is_undefined_without_closed_deals(monkeypatc
     data = client.get('/v1/business/overview', headers={'X-API-Key':'business-doc-test-key'}).json()
     assert data['closed_deals'] == 0
     assert data['closed_win_rate_percent'] is None
+
+
+def test_workflow_requires_approval_and_verified_evidence(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    assert client.get('/v1/business/workflows').status_code == 401
+    payload = {'title': 'Daily opening routine', 'goal': "Prepare today's service schedule", 'steps': [
+        {'title': "Review today's bookings", 'action_type': 'prepare', 'description': 'Check confirmed jobs'},
+        {'title': 'Prepare customer reminders', 'action_type': 'external_action', 'description': 'Draft reminders for owner review'},
+    ]}
+    made = client.post('/v1/business/workflows', headers=h, json=payload)
+    assert made.status_code == 200, made.text
+    wf = made.json()['workflow']; wid = wf['id']
+    assert wf['status'] == 'draft' and wf['approval_status'] == 'pending'
+    assert client.patch(f'/v1/business/workflows/{wid}/steps/0', headers=h, json={'status':'in_progress'}).status_code == 409
+    approved = client.post(f'/v1/business/workflows/{wid}/approve', headers=h)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()['workflow']['status'] == 'approved'
+    assert client.patch(f'/v1/business/workflows/{wid}/steps/0', headers=h, json={'status':'completed'}).status_code == 422
+    done = client.patch(f'/v1/business/workflows/{wid}/steps/0', headers=h, json={'status':'completed','evidence':'Reviewed 4 confirmed bookings in the schedule.'})
+    assert done.status_code == 200, done.text
+    assert done.json()['workflow']['status'] == 'in_progress'
+    listing = client.get('/v1/business/workflows', headers=h)
+    assert listing.status_code == 200 and listing.json()['count'] == 1
+    assert listing.json()['workflows'][0]['steps'][0]['evidence'].startswith('Reviewed 4')
+    assert client.get('/v1/business/workflows', headers={'X-API-Key':'wrong-key'}).status_code == 401
+
+
+def test_workflow_data_is_scoped_to_owner(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    wf = client.post('/v1/business/workflows', headers=h, json={'title':'Private routine','goal':'Only my business','steps':[{'title':'Review jobs'}]}).json()['workflow']
+    from app.business_documents import _db
+    conn = _db()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM business_workflows WHERE user_id=?', ('another-user',)).fetchone()[0] == 0
+        assert conn.execute('SELECT COUNT(*) FROM business_workflows WHERE user_id=?', ('local',)).fetchone()[0] == 1
+    finally:
+        conn.close()
+    assert client.post(f"/v1/business/workflows/{wf['id']}/approve", headers={'X-API-Key':'wrong-key'}).status_code == 401
