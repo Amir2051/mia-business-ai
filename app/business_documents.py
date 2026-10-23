@@ -212,16 +212,42 @@ class InvoiceCreate(BaseModel):
     business_name: str = Field(default="", max_length=180)
     business_email: str = Field(default="", max_length=254)
     business_address: str = Field(default="", max_length=500)
+    business_address_line1: str = Field(default="", max_length=180)
+    business_address_line2: str = Field(default="", max_length=180)
+    business_city: str = Field(default="", max_length=100)
+    business_state: str = Field(default="", max_length=100)
+    business_zip: str = Field(default="", max_length=30)
+    business_country: str = Field(default="", max_length=100)
+    business_phone: str = Field(default="", max_length=80)
+    company_logo_data: str = Field(default="", max_length=200000)
     customer_name: str = Field(min_length=1, max_length=180)
+    customer_company: str = Field(default="", max_length=180)
+    customer_attention: str = Field(default="", max_length=180)
     customer_email: str = Field(default="", max_length=254)
+    customer_phone: str = Field(default="", max_length=80)
     customer_address: str = Field(default="", max_length=500)
+    customer_address_line1: str = Field(default="", max_length=180)
+    customer_address_line2: str = Field(default="", max_length=180)
+    customer_city: str = Field(default="", max_length=100)
+    customer_state: str = Field(default="", max_length=100)
+    customer_zip: str = Field(default="", max_length=30)
+    customer_country: str = Field(default="", max_length=100)
     issue_date: str = Field(default="", max_length=30)
     due_date: str = Field(default="", max_length=30)
     currency: str = Field(default="USD", pattern="^[A-Z]{3}$")
     tax_rate: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     discount: Decimal = Field(default=Decimal("0"), ge=0, le=100000000)
     payment_terms: str = Field(default="Due upon receipt", max_length=300)
+    payment_method: str = Field(default="", max_length=120)
+    bank_name: str = Field(default="", max_length=180)
+    account_number: str = Field(default="", max_length=100)
+    routing_number: str = Field(default="", max_length=100)
+    swift_code: str = Field(default="", max_length=100)
+    additional_notes: str = Field(default="", max_length=3000)
     notes: str = Field(default="", max_length=3000)
+    prepared_by_name: str = Field(default="", max_length=180)
+    prepared_by_title: str = Field(default="", max_length=180)
+    prepared_by_date: str = Field(default="", max_length=30)
     items: list[InvoiceItem] = Field(min_length=1, max_length=100)
 
 def _safe_name(title: str, ext: str) -> str:
@@ -252,9 +278,111 @@ def _pdf_bytes(title: str, content: str) -> bytes:
         story.append(Spacer(1, 8))
     doc.build(story); return out.getvalue()
 
+def _invoice_pdf_bytes(title: str, content: str) -> bytes:
+    """Render an invoice as a clean, paginated PDF with line-item and totals tables."""
+    import base64
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_RIGHT, TA_LEFT
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
+    marker = "\n<!--MIA_INVOICE_DATA:"
+    data = {}
+    if marker in content:
+        try:
+            data = json.loads(content.split(marker, 1)[1].split("-->", 1)[0])
+        except (ValueError, IndexError, TypeError):
+            data = {}
+    if not data:
+        return _pdf_bytes(title, content)
+    out = io.BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=letter, rightMargin=.58*inch, leftMargin=.58*inch, topMargin=.5*inch, bottomMargin=.55*inch, title=title, author=str(data.get("prepared_by_name") or data.get("business_name") or "MIA Business AI"))
+    navy = colors.HexColor("#24364b"); blue = colors.HexColor("#426a9c"); pale = colors.HexColor("#eef3f8"); line = colors.HexColor("#d6dee8"); muted = colors.HexColor("#596779"); ink = colors.HexColor("#202b39")
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="InvoiceTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=24, leading=28, textColor=navy, alignment=TA_RIGHT, spaceAfter=2))
+    styles.add(ParagraphStyle(name="InvoiceMeta", parent=styles["Normal"], fontSize=9, leading=13, textColor=muted, alignment=TA_RIGHT))
+    styles.add(ParagraphStyle(name="InvoiceSection", parent=styles["Heading3"], fontSize=9, leading=12, textColor=blue, spaceAfter=5, uppercase=True))
+    styles.add(ParagraphStyle(name="InvoiceBody", parent=styles["BodyText"], fontSize=9, leading=13, textColor=ink, spaceAfter=1))
+    styles.add(ParagraphStyle(name="InvoiceSmall", parent=styles["BodyText"], fontSize=8, leading=11, textColor=muted))
+    styles.add(ParagraphStyle(name="InvoiceCell", parent=styles["BodyText"], fontSize=8.5, leading=11, textColor=ink))
+    styles.add(ParagraphStyle(name="InvoiceCellRight", parent=styles["InvoiceCell"], alignment=TA_RIGHT))
+    styles.add(ParagraphStyle(name="InvoiceWhite", parent=styles["InvoiceCell"], fontName="Helvetica-Bold", textColor=colors.white))
+    P=lambda value, style="InvoiceBody": Paragraph(escape(str(value or "")).replace("\n","<br/>") or "—", styles[style])
+    def address(prefix):
+        result=[]
+        for key in (f"{prefix}_address_line1", f"{prefix}_address_line2"):
+            if data.get(key): result.append(str(data[key]))
+        cityline = ", ".join(str(data[k]) for k in (f"{prefix}_city", f"{prefix}_state") if data.get(k))
+        if data.get(f"{prefix}_zip"): cityline = (cityline + " " if cityline else "") + str(data[f"{prefix}_zip"])
+        if cityline: result.append(cityline)
+        if data.get(f"{prefix}_country"): result.append(str(data[f"{prefix}_country"]))
+        if not result and data.get(f"{prefix}_address"): result.append(str(data[f"{prefix}_address"]))
+        return result
+    story=[]
+    brand=[]
+    logo=data.get("company_logo_data", "")
+    if logo:
+        try:
+            raw=base64.b64decode(logo.split(",",1)[-1], validate=True)
+            if len(raw) <= 140000 and (raw.startswith(b"\x89PNG\r\n\x1a\n") or raw.startswith(b"\xff\xd8\xff")):
+                im=Image(io.BytesIO(raw), width=1.35*inch, height=.65*inch, kind="proportional"); im._restrictSize(1.35*inch,.65*inch); brand.append(im)
+        except Exception:
+            pass
+    if not brand: brand.append(Paragraph("<b>"+escape(str(data.get("business_name") or "Your Business"))+"</b>", ParagraphStyle("Wordmark",parent=styles["Heading2"],fontSize=15,leading=18,textColor=navy)))
+    brand.append(Spacer(1,5))
+    issuer=[P(x) for x in [*address("business"), data.get("business_email"), data.get("business_phone")] if x]
+    brand.extend(issuer or [P("Business contact details not provided.","InvoiceSmall")])
+    meta=[Paragraph("INVOICE",styles["InvoiceTitle"]),Paragraph("Invoice # " + escape(str(data.get("invoice_number") or "")),styles["InvoiceMeta"]),Paragraph("Date: " + escape(str(data.get("issue_date") or "Not specified")),styles["InvoiceMeta"]),Paragraph("Due: " + escape(str(data.get("due_date") or "Not specified")),styles["InvoiceMeta"])]
+    header=Table([[brand,meta]],colWidths=[3.45*inch,3.45*inch]);header.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("ALIGN",(1,0),(1,0),"RIGHT"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),12)]));story += [header,Spacer(1,12)]
+    customer=[P("BILL TO","InvoiceSection")]
+    if data.get("customer_company"): customer.append(P(data["customer_company"]))
+    customer.append(P(data.get("customer_name")))
+    if data.get("customer_attention"): customer.append(P("Attention: "+str(data["customer_attention"]),"InvoiceSmall"))
+    customer += [P(x) for x in [*address("customer"),data.get("customer_email"),data.get("customer_phone")] if x]
+    if data.get("customer_address") and not address("customer"): customer.append(P(data["customer_address"]))
+    if data.get("customer_name"):
+        billbox=Table([[customer]],colWidths=[3.45*inch]);billbox.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),pale),("BOX",(0,0),(-1,-1),.5,line),("LEFTPADDING",(0,0),(-1,-1),10),("RIGHTPADDING",(0,0),(-1,-1),10),("TOPPADDING",(0,0),(-1,-1),9),("BOTTOMPADDING",(0,0),(-1,-1),9)]));story += [billbox,Spacer(1,18)]
+    item_rows=[[P("DESCRIPTION","InvoiceWhite"),P("QTY","InvoiceWhite"),P("UNIT PRICE","InvoiceWhite"),P("TOTAL","InvoiceWhite")]]
+    currency=str(data.get("currency") or "USD")
+    for item in data.get("items",[]):
+        item_rows.append([P(item.get("description")),P(item.get("quantity"),"InvoiceCellRight"),P(currency+" "+str(item.get("unit_price")),"InvoiceCellRight"),P(currency+" "+str(item.get("amount")),"InvoiceCellRight")])
+    items_table=Table(item_rows,colWidths=[3.5*inch,.65*inch,1.25*inch,1.25*inch],repeatRows=1,hAlign="LEFT")
+    items_table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),navy),("VALIGN",(0,0),(-1,-1),"TOP"),("GRID",(0,0),(-1,-1),.35,line),("LEFTPADDING",(0,0),(-1,-1),7),("RIGHTPADDING",(0,0),(-1,-1),7),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,pale])]))
+    story += [items_table,Spacer(1,10)]
+    totals=[]
+    for label,key in (("Subtotal","subtotal"),("Discount","discount"),("Tax ("+str(data.get("tax_rate",0))+"%)","tax"),("TOTAL AMOUNT DUE","total")):
+        if label=="Discount" and Decimal(str(data.get(key,"0")))==0: continue
+        style="InvoiceWhite" if key=="total" else "InvoiceCellRight"
+        totals.append([P(label,style if key=="total" else "InvoiceCell"),P(currency+" "+str(data.get(key,"0.00")),style)])
+    total_table=Table(totals,colWidths=[1.8*inch,1.45*inch],hAlign="RIGHT")
+    total_table.setStyle(TableStyle([("ALIGN",(1,0),(-1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),navy),("LINEABOVE",(0,0),(-1,-2),.4,line),("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))
+    story += [total_table,Spacer(1,18)]
+    payment=[P("PAYMENT INSTRUCTIONS","InvoiceSection")]
+    for label,key in (("Payment method","payment_method"),("Terms","payment_terms"),("Bank","bank_name"),("Account number","account_number"),("Routing number","routing_number"),("SWIFT code","swift_code")):
+        if data.get(key): payment.append(P(label+": "+str(data[key])))
+    if not any(data.get(k) for k in ("payment_method","bank_name","account_number","routing_number","swift_code")) and not data.get("payment_terms"):
+        payment.append(P("Payment instructions not provided; add them before sending.","InvoiceSmall"))
+    story.append(KeepTogether(payment))
+    notes=data.get("additional_notes") or data.get("notes")
+    if notes: story += [Spacer(1,10),P("NOTE / TERMS","InvoiceSection"),P(notes)]
+    prepared=[x for x in (data.get("prepared_by_name"),data.get("prepared_by_title"),data.get("prepared_by_date")) if x]
+    if prepared: story += [Spacer(1,16),P("PREPARED BY","InvoiceSection"),P(" · ".join(prepared))]
+    contact=[x for x in (data.get("business_email"),data.get("business_phone")) if x]
+    if contact: story += [Spacer(1,8),P("CONTACT","InvoiceSection"),P(" · ".join(contact),"InvoiceSmall")]
+    story += [Spacer(1,18),P("Thank you for your business.","InvoiceSection")]
+    def footer(canvas, document):
+        canvas.saveState();canvas.setStrokeColor(line);canvas.line(.58*inch,.4*inch,7.92*inch,.4*inch);canvas.setFont("Helvetica",7.5);canvas.setFillColor(muted);canvas.drawString(.58*inch,.25*inch,str(data.get("business_name") or "Your Business"));canvas.drawRightString(7.92*inch,.25*inch,f"Page {document.page}");canvas.restoreState()
+    doc.build(story,onFirstPage=footer,onLaterPages=footer)
+    return out.getvalue()
+
+
 def _render(title: str, content: str, fmt: str) -> tuple[bytes,str]:
     if fmt not in FORMATS: raise HTTPException(status_code=422, detail=f"Unsupported format. Choose: {', '.join(sorted(FORMATS))}")
-    if fmt == "pdf": return _pdf_bytes(title, content), MIME[fmt]
+    if fmt == "pdf":
+        if "<!--MIA_INVOICE_DATA:" in content: return _invoice_pdf_bytes(title, content), MIME[fmt]
+        return _pdf_bytes(title, content), MIME[fmt]
     if fmt == "docx":
         try: from docx import Document
         except ImportError as exc: raise HTTPException(status_code=503, detail="DOCX generation is unavailable; install python-docx") from exc
@@ -631,11 +759,19 @@ def create_router(auth_dependency):
             items.append({"description":item.description.strip(),"quantity":str(item.quantity),"unit_price":str(cents(item.unit_price)),"amount":str(amount)})
         discount=min(cents(payload.discount),cents(subtotal)); taxable=max(Decimal("0.00"),subtotal-discount)
         tax=cents(taxable*payload.tax_rate/Decimal("100")); total=cents(taxable+tax)
-        lines=[f"Invoice {number}","",payload.business_name.strip(),payload.business_email.strip(),payload.business_address.strip(),"",f"Bill to: {payload.customer_name.strip()}",payload.customer_email.strip(),payload.customer_address.strip(),"",f"Issue date: {payload.issue_date or 'Not specified'}",f"Due date: {payload.due_date or 'Not specified'}",f"Currency: {payload.currency}","","ITEMS"]
+        if payload.company_logo_data:
+            import base64
+            try: raw_logo=base64.b64decode(payload.company_logo_data.split(",",1)[-1],validate=True)
+            except Exception: raise HTTPException(status_code=422,detail="Company logo must be a valid PNG or JPEG image") from None
+            if len(raw_logo)>140000 or not (raw_logo.startswith(b"\x89PNG\r\n\x1a\n") or raw_logo.startswith(b"\xff\xd8\xff")):
+                raise HTTPException(status_code=422,detail="Company logo must be PNG or JPEG and no larger than 140 KB")
+        data=payload.model_dump(mode="json")
+        data.update({"invoice_number":number,"items":items,"subtotal":str(cents(subtotal)),"discount":str(discount),"tax":str(tax),"total":str(total)})
+        lines=[f"Invoice {number}","",payload.business_name.strip(),payload.business_email.strip(),payload.business_phone.strip(),payload.business_address.strip(),"",f"Bill to: {payload.customer_company.strip() or payload.customer_name.strip()}",payload.customer_name.strip(),payload.customer_email.strip(),payload.customer_phone.strip(),payload.customer_address.strip(),"",f"Issue date: {payload.issue_date or 'Not specified'}",f"Due date: {payload.due_date or 'Not specified'}",f"Currency: {payload.currency}","","ITEMS"]
         lines += [f"{i+1}. {x['description']} | Qty {x['quantity']} × {x['unit_price']} = {x['amount']} {payload.currency}" for i,x in enumerate(items)]
         lines += ["",f"Subtotal: {cents(subtotal)} {payload.currency}",f"Discount: {discount} {payload.currency}",f"Tax ({payload.tax_rate}%): {tax} {payload.currency}",f"TOTAL DUE: {total} {payload.currency}","",f"Payment terms: {payload.payment_terms.strip()}"]
-        if payload.notes.strip(): lines += ["", "Notes:",payload.notes.strip()]
-        content="\n".join(x for x in lines if x is not None)
+        if payload.notes.strip() or payload.additional_notes.strip(): lines += ["", "Notes:",payload.additional_notes.strip() or payload.notes.strip()]
+        content="\n".join(x for x in lines if x is not None)+"\n<!--MIA_INVOICE_DATA:"+json.dumps(data,ensure_ascii=False,separators=(",",":"))+"-->"
         fid=_save(str(user["id"]),f"Invoice {number}",content,"pdf","invoice")
-        return {"invoice":{"id":fid,"invoice_number":number,"currency":payload.currency,"items":items,"subtotal":str(cents(subtotal)),"discount":str(discount),"tax_rate":str(payload.tax_rate),"tax":str(tax),"total":str(total),"title":f"Invoice {number}","content":content,"preview_url":f"/v1/business/files/{fid}","download_url":f"/v1/business/files/{fid}/download"}}
+        return {"invoice":{"id":fid,"invoice_number":number,"currency":payload.currency,"items":items,"subtotal":str(cents(subtotal)),"discount":str(discount),"tax_rate":str(payload.tax_rate),"tax":str(tax),"total":str(total),"title":f"Invoice {number}","content":content.split("\n<!--MIA_INVOICE_DATA:",1)[0],"preview_url":f"/v1/business/files/{fid}","download_url":f"/v1/business/files/{fid}/download"}}
     return router
