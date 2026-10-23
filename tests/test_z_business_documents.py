@@ -131,3 +131,42 @@ def test_capability_database_default_is_isolated_from_original_rz_agent(monkeypa
         conn.close()
     assert kind == 'sqlite'
     assert Path(path) == tmp_path / '.mia-business-ai' / 'capabilities.sqlite3'
+
+def test_client_pipeline_create_filter_update_delete_and_private_storage(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    assert client.get('/v1/business/clients').status_code == 401
+    made = client.post('/v1/business/clients', headers=h, json={
+        'name': 'Alex Rivera', 'company': 'Northstar Studio', 'email': 'alex@example.com',
+        'stage': 'qualified', 'expected_value': '2500', 'next_follow_up': '2026-10-25',
+        'notes': 'Needs a short discovery call.',
+    })
+    assert made.status_code == 200, made.text
+    record = made.json()['client']; cid = record['id']
+    listing = client.get('/v1/business/clients', headers=h).json()
+    assert listing['count'] == 1 and listing['open_pipeline_value'] == '2500.00'
+    assert listing['clients'][0]['email'] == 'alex@example.com'
+    assert client.get('/v1/business/clients?stage=won', headers=h).json()['count'] == 0
+    updated = client.put(f'/v1/business/clients/{cid}', headers=h, json={
+        'name': 'Alex Rivera', 'company': 'Northstar Studio', 'email': 'alex@example.com',
+        'stage': 'proposal', 'expected_value': '3000', 'next_follow_up': '2026-10-26',
+        'notes': 'Proposal sent for review.',
+    })
+    assert updated.status_code == 200, updated.text
+    assert client.get('/v1/business/clients?stage=proposal', headers=h).json()['count'] == 1
+    assert client.get('/v1/business/clients', headers=h).json()['open_pipeline_value'] == '3000.00'
+    from app.business_documents import _db
+    conn = _db()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM business_clients WHERE user_id=?', ('another-user',)).fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert client.delete(f'/v1/business/clients/{cid}', headers=h).json()['deleted'] is True
+    assert client.delete(f'/v1/business/clients/{cid}', headers=h).status_code == 404
+
+
+def test_client_pipeline_rejects_invalid_stage_and_followup_date(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path); h = {'X-API-Key': 'business-doc-test-key'}
+    base = {'name': 'Taylor', 'expected_value': '10'}
+    assert client.post('/v1/business/clients', headers=h, json={**base, 'stage': 'maybe'}).status_code == 422
+    assert client.post('/v1/business/clients', headers=h, json={**base, 'next_follow_up': 'next Tuesday'}).status_code == 422

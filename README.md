@@ -173,7 +173,7 @@ Business artifacts use `MIA_BUSINESS_DATA_PATH` and a dedicated SQLite database 
 
 ## Business profile and personalization
 
-The Business overview includes a per-user business profile (business name, industry, target customers, offer, goals, brand voice, and constraints). The profile is stored in the dedicated `MIA_BUSINESS_DATA_PATH` database and is added as reference context to new MIA chat requests. It does not override safety, privacy, or truthfulness rules. General tone, language, and response-depth settings remain available under **Customize MIA**.
+The Business overview includes a per-user business profile (business name, industry, target customers, offer, goals, brand voice, and constraints). The Client pipeline provides a lightweight owner-scoped CRM for contact details, pipeline stage, expected deal value, next follow-up date, and notes; it does not send messages or contact clients. The profile is stored in the dedicated `MIA_BUSINESS_DATA_PATH` database and is added as reference context to new MIA chat requests. It does not override safety, privacy, or truthfulness rules. General tone, language, and response-depth settings remain available under **Customize MIA**.
 
 ## Approval center
 

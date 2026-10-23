@@ -33,6 +33,12 @@ def _db():
       offer TEXT NOT NULL DEFAULT '', goals TEXT NOT NULL DEFAULT '',
       brand_voice TEXT NOT NULL DEFAULT '', constraints TEXT NOT NULL DEFAULT '',
       updated_at REAL NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS business_clients(
+      user_id TEXT NOT NULL, client_id TEXT NOT NULL, name TEXT NOT NULL,
+      company TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+      stage TEXT NOT NULL, expected_value TEXT NOT NULL DEFAULT '0', next_follow_up TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL,
+      PRIMARY KEY(user_id,client_id))""")
     conn.commit()
     return conn
 
@@ -63,6 +69,23 @@ def get_business_profile(user_id: str) -> dict:
         conn.close()
     keys = ("business_name", "industry", "target_customers", "offer", "goals", "brand_voice", "constraints", "updated_at")
     return dict(zip(keys, row)) if row else {**{k: "" for k in keys[:-1]}, "updated_at": None}
+
+
+class BusinessClient(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    company: str = Field(default="", max_length=180)
+    email: str = Field(default="", max_length=254)
+    phone: str = Field(default="", max_length=80)
+    stage: Literal["lead", "contacted", "qualified", "proposal", "won", "lost"] = "lead"
+    expected_value: Decimal = Field(default=Decimal("0"), ge=0, le=100000000)
+    next_follow_up: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$", max_length=10)
+    notes: str = Field(default="", max_length=3000)
+
+
+def _client_dict(row):
+    return {"id": row[0], "name": row[1], "company": row[2], "email": row[3], "phone": row[4],
+            "stage": row[5], "expected_value": row[6], "next_follow_up": row[7], "notes": row[8],
+            "created_at": row[9], "updated_at": row[10]}
 
 
 class InvoiceItem(BaseModel):
@@ -171,6 +194,73 @@ def create_router(auth_dependency):
         finally:
             conn.close()
         return {"profile": {**values, "updated_at": now}, "saved": True}
+
+    @router.get("/clients")
+    def list_business_clients(stage:str="",user:dict=Depends(auth_dependency)):
+        allowed = {"lead", "contacted", "qualified", "proposal", "won", "lost"}
+        if stage and stage not in allowed:
+            raise HTTPException(status_code=422, detail="Unsupported client stage")
+        uid = str(user["id"]); conn = _db()
+        try:
+            query = "SELECT client_id,name,company,email,phone,stage,expected_value,next_follow_up,notes,created_at,updated_at FROM business_clients WHERE user_id=?"
+            params = [uid]
+            if stage:
+                query += " AND stage=?"; params.append(stage)
+            query += " ORDER BY updated_at DESC LIMIT 200"
+            rows = conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+        clients = [_client_dict(row) for row in rows]
+        total = sum((Decimal(c["expected_value"]) for c in clients if c["stage"] not in {"won", "lost"}), Decimal("0"))
+        return {"clients": clients, "count": len(clients), "open_pipeline_value": str(total.quantize(Decimal("0.01")))}
+
+    @router.post("/clients")
+    def create_business_client(payload:BusinessClient,user:dict=Depends(auth_dependency)):
+        uid = str(user["id"]); cid = uuid.uuid4().hex; now = time.time()
+        values = payload.model_dump()
+        values["name"] = values["name"].strip()
+        if not values["name"]:
+            raise HTTPException(status_code=422, detail="Client name cannot be blank")
+        values["expected_value"] = str(Decimal(values["expected_value"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        values = {k: (v.strip() if isinstance(v, str) else v) for k,v in values.items()}
+        conn = _db()
+        try:
+            conn.execute("INSERT INTO business_clients(user_id,client_id,name,company,email,phone,stage,expected_value,next_follow_up,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (uid,cid,values["name"],values["company"],values["email"],values["phone"],values["stage"],values["expected_value"],values["next_follow_up"],values["notes"],now,now)); conn.commit()
+        finally:
+            conn.close()
+        return {"client": {"id":cid,**{k:values[k] for k in ("name","company","email","phone","stage","expected_value","next_follow_up","notes")},"created_at":now,"updated_at":now}}
+
+    @router.put("/clients/{client_id}")
+    def update_business_client(client_id:str,payload:BusinessClient,user:dict=Depends(auth_dependency)):
+        if not re.fullmatch(r"[a-f0-9]{32}", client_id):
+            raise HTTPException(status_code=400, detail="Invalid client id")
+        uid = str(user["id"]); values = payload.model_dump(); values["name"] = values["name"].strip()
+        if not values["name"]:
+            raise HTTPException(status_code=422, detail="Client name cannot be blank")
+        values["expected_value"] = str(Decimal(values["expected_value"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        values = {k: (v.strip() if isinstance(v, str) else v) for k,v in values.items()}; now = time.time(); conn = _db()
+        try:
+            cur = conn.execute("UPDATE business_clients SET name=?,company=?,email=?,phone=?,stage=?,expected_value=?,next_follow_up=?,notes=?,updated_at=? WHERE user_id=? AND client_id=?",
+                (values["name"],values["company"],values["email"],values["phone"],values["stage"],values["expected_value"],values["next_follow_up"],values["notes"],now,uid,client_id)); conn.commit()
+            if not cur.rowcount:
+                raise HTTPException(status_code=404, detail="Client not found")
+        finally:
+            conn.close()
+        return {"client": {"id":client_id,**{k:values[k] for k in ("name","company","email","phone","stage","expected_value","next_follow_up","notes")},"updated_at":now}}
+
+    @router.delete("/clients/{client_id}")
+    def delete_business_client(client_id:str,user:dict=Depends(auth_dependency)):
+        if not re.fullmatch(r"[a-f0-9]{32}", client_id):
+            raise HTTPException(status_code=400, detail="Invalid client id")
+        conn = _db()
+        try:
+            cur = conn.execute("DELETE FROM business_clients WHERE user_id=? AND client_id=?", (str(user["id"]), client_id)); conn.commit()
+        finally:
+            conn.close()
+        if not cur.rowcount:
+            raise HTTPException(status_code=404, detail="Client not found")
+        return {"deleted": True, "id": client_id}
 
     @router.get("/files")
     def list_files(user:dict=Depends(auth_dependency)):
