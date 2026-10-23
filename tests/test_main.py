@@ -10,10 +10,11 @@ from unittest import mock  # noqa: E402
 
 
 @pytest.fixture()
-def app(monkeypatch):
+def app(monkeypatch, tmp_path):
     # Force local API-key mode even if the developer has a private .env file.
     monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("OLLAMA_BASE_URL", "")
+    monkeypatch.setenv("RZ_LOCAL_DATA_PATH", str(tmp_path / "capabilities.sqlite3"))
     os.environ["RZ_API_KEY"] = "test-key"
     os.environ["OPENROUTER_API_KEY"] = "real"
     os.environ["HERMES_API_KEY"] = "hermes-secret"
