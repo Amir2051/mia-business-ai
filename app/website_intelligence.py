@@ -157,56 +157,168 @@ def _fetch_page(url: str):
         return url, "", [], "Could not fetch page"
 
 
+def _flatten_jsonld(value):
+    found = []
+    if isinstance(value, dict):
+        found.append(value)
+        graph = value.get("@graph")
+        if isinstance(graph, list):
+            for item in graph:
+                found.extend(_flatten_jsonld(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_flatten_jsonld(item))
+    return found
+
+
+def _page_type(url: str, title: str, text: str) -> str:
+    value = (url + " " + title).lower()
+    if re.search(r"privacy|cookie|acceptable-use|terms|refund|legal|gdpr", value):
+        return "policy"
+    if re.search(r"contact|location|hours|reach-us", value):
+        return "contact"
+    if re.search(r"pricing|price|plans|packages|rates", value):
+        return "pricing"
+    if re.search(r"service|solution|offering|product", value):
+        return "services"
+    if re.search(r"about|company-profile|team|who-we-are", value):
+        return "about"
+    if re.search(r"faq|frequently-asked", value):
+        return "faq"
+    if re.search(r"blog|news|article|post/", value):
+        return "article"
+    return "home" if urlparse(url).path in {"", "/"} else "other"
+
+
 def _extract(url: str, raw_html: str):
     parser = _PageParser()
     try:
         parser.feed(raw_html)
     except Exception:
         pass
-    text = re.sub(r"[ \t]+", " ", " ".join(parser.parts))
-    text = re.sub(r"\n\s*\n+", "\n", text).strip()[:20_000]
+    text = "\n".join(" ".join(part.split()) for part in parser.parts if part.strip())
+    text = re.sub(r"\n{2,}", "\n", text).strip()[:20_000]
     title = " ".join(" ".join(parser.title).split())[:250]
     links = []
+    root_host = (urlparse(url).hostname or "").lower()
     for href, label in parser.links:
         absolute = urldefrag(urljoin(url, href))[0]
         parsed = urlparse(absolute)
-        if parsed.scheme in {"http", "https"} and parsed.hostname == urlparse(url).hostname:
-            if any(term in (absolute + " " + label).lower() for term in (
+        target = (absolute + " " + label).lower()
+        if parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() == root_host:
+            if re.search(r"privacy|cookie|acceptable-use|terms|refund|legal|gdpr", target):
+                continue
+            if any(term in target for term in (
                 "about", "service", "pricing", "price", "contact", "faq", "team",
-                "company", "location", "area", "hours", "policy", "booking", "home"
+                "company", "location", "area", "hours", "booking", "home", "product",
+                "solution", "package", "quote", "support"
             )):
                 links.append(absolute)
+    structured = []
+    for item in parser.structured:
+        structured.extend(_flatten_jsonld(item))
     return {
-        "url": url,
-        "title": title,
-        "text": text,
-        "meta": parser.meta,
+        "url": url, "title": title, "text": text,
+        "headings": list(dict.fromkeys(parser.headings))[:80],
+        "meta": parser.meta, "structured": structured[:50],
+        "page_type": _page_type(url, title, text),
         "links": list(dict.fromkeys(links)),
     }
 
 
 def _derive_profile(pages: list[dict], domain: str):
-    home = pages[0] if pages else {"title": "", "text": "", "meta": {}}
-    all_text = "\n".join(f"{p.get('title','')}\n{p.get('text','')}" for p in pages)
-    site_name = home.get("meta", {}).get("og:site_name", "")
-    title = home.get("meta", {}).get("og:title", "") or home.get("title", "")
-    description = home.get("meta", {}).get("description", "") or home.get("meta", {}).get("og:description", "")
-    business_name = site_name or re.split(r"\s+[|–—-]\s+", title, maxsplit=1)[0]
+    def clean(value, limit=500):
+        if isinstance(value, list):
+            value = ", ".join(str(x) for x in value if x)
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("streetAddress") or ""
+        return " ".join(str(value or "").split())[:limit]
+
+    business_nodes = []
+    for page in pages:
+        for node in page.get("structured", []):
+            kind = node.get("@type", [])
+            if isinstance(kind, str):
+                kind = [kind]
+            if any(x in {"Organization", "LocalBusiness", "ProfessionalService", "Store", "Corporation", "Person"} for x in kind):
+                business_nodes.append(node)
+    home = next((p for p in pages if p.get("page_type") == "home"), pages[0] if pages else {"title": "", "text": "", "meta": {}})
+    meta = home.get("meta", {})
+    primary_node = business_nodes[0] if business_nodes else {}
+    title = meta.get("og:title", "") or home.get("title", "")
+    business_name = clean(primary_node.get("name"), 180) or clean(meta.get("og:site_name"), 180)
     if not business_name:
-        business_name = domain.split(".")[0].replace("-", " ").replace("_", " ").title()
-    # Suggestions only; no industry/customer assumptions are fabricated.
+        business_name = re.split(r"\s+[|–—-]\s+", title, maxsplit=1)[0].strip()[:180]
+    description = clean(primary_node.get("description"), 1000) or clean(meta.get("description") or meta.get("og:description"), 1000)
+    if not description:
+        description = next((clean(p.get("meta", {}).get("description"), 1000) for p in pages if p.get("meta", {}).get("description")), "")
+
+    def jsonld_values(key):
+        values = []
+        for node in business_nodes:
+            value = node.get(key)
+            if key == "address" and isinstance(value, dict):
+                value = ", ".join(clean(value.get(k), 160) for k in ("streetAddress", "addressLocality", "addressRegion", "postalCode", "addressCountry") if value.get(k))
+            elif key == "contactPoint" and isinstance(value, (dict, list)):
+                nodes = value if isinstance(value, list) else [value]
+                value = ", ".join(clean(n.get("telephone") or n.get("email"), 180) for n in nodes if isinstance(n, dict))
+            elif key == "openingHours" and isinstance(value, list):
+                value = ", ".join(clean(x, 100) for x in value)
+            elif isinstance(value, dict):
+                value = value.get("name", "")
+            if value:
+                values.append(clean(value, 600))
+        return list(dict.fromkeys(values))
+
+    page_text = "\n".join(p.get("text", "") for p in pages if p.get("page_type") != "policy")
+    service_values = []
+    for node in business_nodes:
+        for key in ("makesOffer", "hasOfferCatalog", "knowsAbout"):
+            value = node.get(key)
+            items = value if isinstance(value, list) else [value] if value else []
+            for item in items:
+                if isinstance(item, dict):
+                    offer_item = item.get("itemOffered")
+                    item = item.get("name") or (offer_item.get("name") if isinstance(offer_item, dict) else "")
+                if item:
+                    service_values.append(clean(item, 180))
     service_lines = []
-    for line in all_text.splitlines():
-        line = " ".join(line.split()).strip(" •-\t")
-        if 4 <= len(line) <= 180 and re.search(r"\b(service|services|we offer|speciali[sz]e|our work|solutions)\b", line, re.I):
-            service_lines.append(line)
-    return {
-        "business_name": business_name[:180],
-        "industry": "",
-        "target_customers": "",
-        "offer": (description or " ".join(dict.fromkeys(service_lines)) or "")[:1000],
-        "brand_voice": "",
+    for page in pages:
+        if page.get("page_type") not in {"services", "home", "about"}:
+            continue
+        for line in page.get("text", "").splitlines():
+            line = " ".join(line.split()).strip(" •-\t")
+            if 8 <= len(line) <= 180 and re.search(r"\b(cleaning|repair|installation|consulting|service|services|we offer|speciali[sz]e|our work|solutions|products|support|booking|design|maintenance|care|security|software|platform)\b", line, re.I):
+                if line.lower() not in {x.lower() for x in service_lines}:
+                    service_lines.append(line)
+    offer = description or "; ".join(dict.fromkeys(service_values + service_lines))
+    email_values = set(re.findall(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", page_text, re.I))
+    phone_values = set(re.findall(r"(?<!\w)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\w)", page_text))
+    address_values = jsonld_values("address")
+    hours_values = jsonld_values("openingHours")
+    pricing_lines = []
+    for page in pages:
+        if page.get("page_type") == "pricing":
+            pricing_lines.extend([line.strip() for line in page.get("text", "").splitlines() if re.search(r"(?:\$|USD\s*)\d|per (?:hour|visit|month|project)|starting at|from \$", line, re.I)])
+    industry = clean(primary_node.get("additionalType"), 180)
+    if not industry:
+        industry = clean(primary_node.get("@type") if isinstance(primary_node.get("@type"), str) else "", 180)
+    profile = {
+        "business_name": business_name[:180], "industry": industry,
+        "target_customers": "", "offer": offer[:1000], "brand_voice": "",
     }
+    facts = {
+        "summary": description,
+        "services": list(dict.fromkeys(service_values + service_lines))[:20],
+        "contact": {"emails": sorted(email_values)[:12], "phones": sorted(phone_values)[:12],
+                    "addresses": list(dict.fromkeys(address_values))[:5], "hours": list(dict.fromkeys(hours_values))[:10]},
+        "pricing_mentions": list(dict.fromkeys(pricing_lines))[:15],
+        "pages_by_type": {kind: sum(1 for p in pages if p.get("page_type") == kind) for kind in ("home", "about", "services", "pricing", "contact", "faq", "policy", "other", "article")},
+        "structured_data_found": bool(business_nodes),
+        "structured_business_types": list(dict.fromkeys(clean(x, 80) for node in business_nodes for x in ([node.get("@type")] if isinstance(node.get("@type"), str) else node.get("@type", []))))[:10],
+    }
+    inventory = [{"url": p.get("url", ""), "title": p.get("title", ""), "type": p.get("page_type", "other")} for p in pages]
+    return profile, facts, inventory
 
 
 class WebsiteScanRequest(BaseModel):
