@@ -35,49 +35,18 @@ class _PostgresCompatConnection:
         return self._connection.close()
 
 
+def is_postgres(conn) -> bool:
+    """True when conn is the hosted PostgreSQL wrapper (schema owned by migrations)."""
+    return isinstance(conn, _PostgresCompatConnection)
+
+
 def _db():
     dsn = os.getenv("DATABASE_URL", "").strip()
     if dsn:
         import psycopg
-        conn = _PostgresCompatConnection(psycopg.connect(dsn, connect_timeout=5))
-        try:
-            conn.execute("""CREATE TABLE IF NOT EXISTS business_files(
-              user_id TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL,
-              format TEXT NOT NULL, content TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'document',
-              created_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,file_id))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS business_profiles(
-              user_id TEXT PRIMARY KEY, business_name TEXT NOT NULL DEFAULT '',
-              industry TEXT NOT NULL DEFAULT '', target_customers TEXT NOT NULL DEFAULT '',
-              offer TEXT NOT NULL DEFAULT '', goals TEXT NOT NULL DEFAULT '',
-              brand_voice TEXT NOT NULL DEFAULT '', constraints TEXT NOT NULL DEFAULT '',
-              updated_at DOUBLE PRECISION NOT NULL)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS business_clients(
-              user_id TEXT NOT NULL, client_id TEXT NOT NULL, name TEXT NOT NULL,
-              company TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
-              stage TEXT NOT NULL, expected_value TEXT NOT NULL DEFAULT '0', next_follow_up TEXT NOT NULL DEFAULT '',
-              notes TEXT NOT NULL DEFAULT '', created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
-              PRIMARY KEY(user_id,client_id))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS business_growth_plans(
-              user_id TEXT NOT NULL, plan_date TEXT NOT NULL, primary_goal TEXT NOT NULL,
-              hours_available INTEGER NOT NULL, success_metric TEXT NOT NULL DEFAULT '',
-              plan_text TEXT NOT NULL, reflection TEXT NOT NULL DEFAULT '',
-              status TEXT NOT NULL DEFAULT 'active', created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
-              PRIMARY KEY(user_id,plan_date))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS business_client_activities(
-              user_id TEXT NOT NULL, activity_id TEXT NOT NULL, client_id TEXT NOT NULL,
-              activity_type TEXT NOT NULL, summary TEXT NOT NULL, next_step TEXT NOT NULL DEFAULT '',
-              created_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,activity_id))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS business_workflows(
-              user_id TEXT NOT NULL, workflow_id TEXT NOT NULL, title TEXT NOT NULL,
-              goal TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
-              approval_status TEXT NOT NULL DEFAULT 'pending', steps_json TEXT NOT NULL,
-              audit_json TEXT NOT NULL DEFAULT '[]', created_at DOUBLE PRECISION NOT NULL,
-              updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,workflow_id))""")
-            conn.commit()
-            return conn
-        except Exception:
-            conn.close()
-            raise
+        # Hosted schema is owned solely by the SQL migrations (004/005); never
+        # created as a side effect of a connection. Mirrors app/creator.py policy.
+        return _PostgresCompatConnection(psycopg.connect(dsn, connect_timeout=5))
 
     # Local development fallback only. Hosted SQLite is not durable on an
     # ephemeral filesystem; configure this clone's dedicated PostgreSQL URL.

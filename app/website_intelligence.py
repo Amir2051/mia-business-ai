@@ -19,7 +19,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
 
-from app.business_documents import _db, get_business_profile
+from app.business_documents import _db, get_business_profile, is_postgres
 
 MAX_PAGES = 15
 MAX_BYTES = 1_000_000
@@ -331,6 +331,10 @@ def create_router(auth_dependency):
     router = APIRouter(prefix="/v1/business/website", tags=["MIA Website Intelligence"])
 
     def _ensure_table(conn):
+        # On hosted PostgreSQL the schema is owned by the SQL migrations (005);
+        # never create tables as a side effect of a request. Local SQLite dev only.
+        if is_postgres(conn):
+            return
         conn.execute("""CREATE TABLE IF NOT EXISTS business_website_scans(
             user_id TEXT NOT NULL, scan_id TEXT NOT NULL, domain TEXT NOT NULL,
             status TEXT NOT NULL, pages_json TEXT NOT NULL, profile_json TEXT NOT NULL,
