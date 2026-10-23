@@ -163,3 +163,9 @@ export RZ_API_TOKEN='paste-your-scoped-token-here'
 For a one-shot prompt use `./scripts/rz-ai -m "Explain this error"`. To use a different base URL, set `RZ_AI_URL`; the default is `https://rz-ai.safenestt.com`. The CLI stores only a random conversation identifier in `~/.config/rz-ai/session` with restrictive file permissions. The API token remains in the shell environment and is never written by the client.
 
 **Important:** the terminal client sends prompts to the hosted assistant. It does not itself grant the hosted service access to your Kali shell. Local-machine command execution requires a separate, authenticated local bridge and should be enabled only with explicit command approval.
+
+## MIA Business documents and invoices
+
+The business clone adds authenticated, per-user document generation and invoice workflows under `/v1/business`. Supported document exports are PDF, DOCX, TXT, Markdown, CSV, JSON, and HTML. PDF files can be rendered in an inline preview; other formats are previewed as escaped text in the UI. Invoice line totals, discounts, tax, and final totals are calculated server-side using decimal arithmetic. Download actions send a file through the current browser so the user can save it on the device in use.
+
+Business artifacts use `MIA_BUSINESS_DATA_PATH` and a dedicated SQLite database by default; this intentionally does not reuse `DATABASE_URL` or the original RZ Agent/SafeNestT data store. Before deploying this clone for real customer data, provision a dedicated persistent volume/database for this app and set `MIA_BUSINESS_DATA_PATH` to its path. Do not point it at another product's database. A local SQLite database on an ephemeral hosting filesystem is not durable across host replacement.

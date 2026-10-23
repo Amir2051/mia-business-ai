@@ -156,6 +156,8 @@ def require_tool_call_user(request: Request, authorization: str = Header(default
 # MIA Creator is an isolated capability module; chat/model routing and core identity stay unchanged.
 from app.creator import create_router as _create_creator_router
 app.include_router(_create_creator_router(require_app_user))
+from app.business_documents import create_router as _create_business_documents_router
+app.include_router(_create_business_documents_router(require_app_user))
 
 
 @app.get("/v1/auth/mode")
