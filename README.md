@@ -55,9 +55,14 @@ Authenticated clients can query `GET /v1/capabilities` to inspect the active pro
 default model, whether optional task-specific routes are configured, privacy request
 flags, and session limits. This endpoint never returns API keys, prompts, or chat content.
 
-Idle in-memory conversations are removed after `SESSION_TTL_SECONDS` (default: one hour)
-when sessions are accessed or listed. This is memory cleanup, not durable storage:
-conversation history still does not survive a process restart.
+Conversation history is persisted per authenticated user in the configured PostgreSQL
+database or local SQLite store, with a bounded recent-message window. The browser's
+Saved conversations control can list and restore prior sessions after a refresh or
+server restart. Users can reset a conversation to remove its saved history. For hosted
+production, configure a persistent PostgreSQL database; local SQLite may not survive
+replacements on an ephemeral hosting service. Idle in-memory copies are removed after
+`SESSION_TTL_SECONDS` (default: one hour), while the saved record remains available
+until the user resets it.
 
 
 ## Model Context Protocol (MCP) tools

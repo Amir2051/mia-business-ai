@@ -259,6 +259,10 @@ def _db():
     if dsn:
         import psycopg
         conn = psycopg.connect(dsn, connect_timeout=5)
+        conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_conversations (
+            user_id TEXT NOT NULL, session_id TEXT NOT NULL, title TEXT NOT NULL,
+            history JSONB NOT NULL, model TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id, session_id))''')
         conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_memory (
             user_id TEXT NOT NULL, memory_id TEXT NOT NULL, content TEXT NOT NULL,
             created_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id, memory_id))''')
@@ -279,6 +283,10 @@ def _db():
     path = os.getenv('RZ_LOCAL_DATA_PATH', str(Path.home() / '.rz-ai-agent' / 'capabilities.sqlite3'))
     Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(Path(path).expanduser()), timeout=5)
+    conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_conversations (
+        user_id TEXT NOT NULL, session_id TEXT NOT NULL, title TEXT NOT NULL,
+        history TEXT NOT NULL, model TEXT NOT NULL, created_at REAL NOT NULL,
+        updated_at REAL NOT NULL, PRIMARY KEY(user_id, session_id))''')
     conn.execute('''CREATE TABLE IF NOT EXISTS rz_agent_memory (
         user_id TEXT NOT NULL, memory_id TEXT NOT NULL, content TEXT NOT NULL,
         created_at REAL NOT NULL, PRIMARY KEY(user_id, memory_id))''')
@@ -297,6 +305,62 @@ def _db():
             updated_at REAL NOT NULL, PRIMARY KEY(user_id, job_id))''')
     conn.commit()
     return conn, 'sqlite'
+
+
+def save_conversation(user_id: str, session_id: str, history: list[dict], model: str) -> dict:
+    """Persist a bounded conversation for its authenticated owner."""
+    if not user_id or not session_id or not session_id.startswith(str(user_id) + ":"):
+        raise ValueError("conversation owner does not match session")
+    safe_history = [
+        {"role": item.get("role"), "content": str(item.get("content", ""))[:12000]}
+        for item in history[-24:]
+        if isinstance(item, dict) and item.get("role") in {"user", "assistant"} and item.get("content") is not None
+    ]
+    first_user = next((item["content"].strip() for item in safe_history if item["role"] == "user" and item["content"].strip()), "New conversation")
+    title = first_user[:90] or "New conversation"
+    now = time.time()
+    conn, kind = _db()
+    try:
+        if kind == "postgres":
+            conn.execute("INSERT INTO rz_agent_conversations(user_id,session_id,title,history,model,created_at,updated_at) VALUES(%s,%s,%s,%s::jsonb,%s,%s,%s) ON CONFLICT(user_id,session_id) DO UPDATE SET title=EXCLUDED.title,history=EXCLUDED.history,model=EXCLUDED.model,updated_at=EXCLUDED.updated_at", (str(user_id),session_id,title,json.dumps(safe_history,ensure_ascii=False),model,now,now))
+        else:
+            conn.execute("INSERT INTO rz_agent_conversations(user_id,session_id,title,history,model,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,session_id) DO UPDATE SET title=excluded.title,history=excluded.history,model=excluded.model,updated_at=excluded.updated_at", (str(user_id),session_id,title,json.dumps(safe_history,ensure_ascii=False),model,now,now))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"session_id": session_id, "title": title, "model": model, "updated_at": now, "history_length": len(safe_history)}
+
+def get_conversation(user_id: str, session_id: str) -> dict | None:
+    conn, kind = _db()
+    try:
+        q = "SELECT title,history,model,created_at,updated_at FROM rz_agent_conversations WHERE user_id=%s AND session_id=%s" if kind == "postgres" else "SELECT title,history,model,created_at,updated_at FROM rz_agent_conversations WHERE user_id=? AND session_id=?"
+        row = conn.execute(q, (str(user_id), session_id)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    history = row[1] if isinstance(row[1], list) else json.loads(row[1])
+    return {"session_id": session_id, "title": row[0], "history": history, "model": row[2], "created_at": row[3], "updated_at": row[4]}
+
+def list_conversations(user_id: str, limit: int = 30) -> dict:
+    limit = max(1, min(int(limit), 100))
+    conn, kind = _db()
+    try:
+        q = "SELECT session_id,title,model,created_at,updated_at FROM rz_agent_conversations WHERE user_id=%s ORDER BY updated_at DESC LIMIT %s" if kind == "postgres" else "SELECT session_id,title,model,created_at,updated_at FROM rz_agent_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?"
+        rows = conn.execute(q, (str(user_id), limit)).fetchall()
+    finally:
+        conn.close()
+    return {"conversations": [{"session_id": r[0], "title": r[1], "model": r[2], "created_at": r[3], "updated_at": r[4]} for r in rows], "count": len(rows)}
+
+def delete_conversation(user_id: str, session_id: str) -> bool:
+    conn, kind = _db()
+    try:
+        q = "DELETE FROM rz_agent_conversations WHERE user_id=%s AND session_id=%s" if kind == "postgres" else "DELETE FROM rz_agent_conversations WHERE user_id=? AND session_id=?"
+        cur = conn.execute(q, (str(user_id), session_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 def save_memory(user_id: str, content: str) -> dict:
     if not isinstance(content, str) or not content.strip() or len(content) > MAX_MEMORY:

@@ -424,7 +424,15 @@ def _get_session(session_id: str) -> dict:
         _prune_expired_sessions_locked()
         conv = _conversations.get(session_id)
         if conv is None:
-            conv = {"history": [], "updated": time.time(), "model": OPENROUTER_MODEL}
+            owner_id = session_id.split(":", 1)[0] if isinstance(session_id, str) and ":" in session_id else ""
+            stored = None
+            if owner_id:
+                try:
+                    stored = cap_services.get_conversation(owner_id, session_id)
+                except Exception:
+                    # Persistence trouble must not prevent a fresh chat from working.
+                    stored = None
+            conv = {"history": (stored or {}).get("history", []), "updated": time.time(), "model": (stored or {}).get("model", OPENROUTER_MODEL)}
             _conversations[session_id] = conv
         return conv
 
@@ -436,6 +444,13 @@ def _touch_session(session_id: str, model: str) -> dict:
     conv["model"] = model
     with _store_lock:
         _conversations[session_id] = conv
+    owner_id = session_id.split(":", 1)[0] if isinstance(session_id, str) and ":" in session_id else ""
+    if owner_id:
+        try:
+            cap_services.save_conversation(owner_id, session_id, conv["history"], model)
+        except Exception as exc:
+            # Chat stays available if durable history storage has a temporary outage.
+            print("RZ_CONVERSATION_PERSISTENCE_ERROR", {"error_type": type(exc).__name__}, flush=True)
     return conv
 
 
@@ -1571,20 +1586,46 @@ def synthesize_voice(request: InworldSpeechRequest, current_user: dict = Depends
 
 @app.post("/v1/conversations/{session_id}")
 def reset_conversation(session_id: str, current_user: dict = Depends(require_app_user)):
-    if not session_id.startswith(f"{current_user['id']}:"):
+    owner_id = str(current_user["id"])
+    if not session_id.startswith(f"{owner_id}:"):
         raise HTTPException(status_code=404, detail="Conversation not found")
     with _store_lock:
         _conversations.pop(session_id, None)
+    cap_services.delete_conversation(owner_id, session_id)
     return {"status": "ok", "session_id": session_id, "reset": True}
 
 
 @app.get("/v1/conversations")
 def list_conversations(current_user: dict = Depends(require_app_user)):
-    prefix = f"{current_user['id']}:"
+    owner_id = str(current_user["id"])
+    try:
+        stored = cap_services.list_conversations(owner_id, 50)
+    except Exception as exc:
+        print("RZ_CONVERSATION_LIST_ERROR", {"error_type": type(exc).__name__}, flush=True)
+        raise HTTPException(status_code=503, detail="Saved conversation history is temporarily unavailable") from None
+    # Include currently active empty sessions only when they have not yet been persisted.
+    prefix = f"{owner_id}:"
     with _store_lock:
         _prune_expired_sessions_locked()
-        ids = sorted(k for k in _conversations.keys() if k.startswith(prefix))
-    return {"status": "ok", "count": len(ids), "sessions": ids}
+        active = [k for k in _conversations if k.startswith(prefix) and k not in {c["session_id"] for c in stored["conversations"]}]
+    stored["sessions"] = [c["session_id"] for c in stored["conversations"]] + active
+    return {"status": "ok", **stored}
+
+
+@app.get("/v1/conversations/{session_id}")
+def read_conversation(session_id: str, current_user: dict = Depends(require_app_user)):
+    owner_id = str(current_user["id"])
+    if not session_id.startswith(f"{owner_id}:"):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    stored = cap_services.get_conversation(owner_id, session_id)
+    if not stored:
+        with _store_lock:
+            active = _conversations.get(session_id)
+            if active:
+                stored = {"session_id": session_id, "history": active.get("history", []), "model": active.get("model", OPENROUTER_MODEL), "title": "Active conversation"}
+    if not stored:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"status": "ok", "conversation": stored}
 
 
 # ---------------------------------------------------------------- Model Context Protocol (MCP)
