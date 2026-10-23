@@ -391,8 +391,8 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
     # so do not require the word Invoice to occupy an entire line.
     is_invoice = bool(re.search(r"(?i)\binvoice\b", title + "\n" + plain))
     is_proposal = bool(re.search(r"(?i)\bproposal\b", title + "\n" + plain))
-    has_service_sections = bool(re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services|Client Information|Products/Services Included|Services Offered", plain))
-    if not (is_invoice and has_service_sections) and not (is_proposal and re.search(r"(?i)Services Offered|Pricing Information", plain)):
+    has_service_sections = bool(re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services|Client Information|Products/Services Included|Services Offered|Services Provided", plain))
+    if not (is_invoice and has_service_sections) and not (is_proposal and re.search(r"(?i)Services Offered|Services Provided|Pricing Information", plain)):
         return None
 
     invoice_to = re.split(r"(?i)Invoice To:\s*", plain, maxsplit=1)[-1]
@@ -469,6 +469,21 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
                 name = match.group(1).strip()
                 description = name + (": " + desc_match.group(1).strip() if desc_match else "")
                 data["items"].append({"description": description, "quantity": "—", "unit_price": "—", "amount": "—"})
+    if not data["items"]:
+        # Proposal format: numbered bold service headings followed by descriptive bullets.
+        provided = re.split(r"(?i)Services Provided\\s*", plain, maxsplit=1)
+        if len(provided) > 1:
+            provided = re.split(r"(?im)^\\s*#{0,3}\\s*(?:Implementation Plan|Next Steps|Contact Information|Preview|Note)\\b", provided[1], maxsplit=1)[0]
+            blocks = list(re.finditer(r"(?im)^\\s*\\*{0,2}\\s*\\d+\\.\\s+([^*\\n]+?)\\s*\\*{0,2}\\s*$", provided))
+            for i, match in enumerate(blocks):
+                end = blocks[i + 1].start() if i + 1 < len(blocks) else len(provided)
+                name = re.sub(r"\\*+", "", match.group(1)).strip()
+                tail = provided[match.end():end]
+                details = [re.sub(r"^\\s*[-*]\\s*", "", line).strip() for line in tail.splitlines() if re.match(r"^\\s*[-*]\\s+", line)]
+                details = [re.sub(r"\\*+", "", line) for line in details if line]
+                description = name + (": " + " ".join(details) if details else "")
+                if name:
+                    data["items"].append({"description": description, "quantity": "—", "unit_price": "—", "amount": "—"})
     if not data["items"]:
         # Proposal documents commonly use "**Service:** description" bullets under
         # "Services Offered", rather than invoice-style numbered service blocks.
