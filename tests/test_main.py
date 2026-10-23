@@ -85,37 +85,28 @@ def test_inworld_realtime_session_token_is_minted_without_exposing_api_key(app, 
     assert len(calls) == 2
 
 
-def test_openrouter_retries_free_router_when_model_is_zdr_blocked(app, monkeypatch):
+def test_openrouter_does_not_bypass_zdr_policy_with_free_router(app, monkeypatch):
     from io import BytesIO
     from urllib.error import HTTPError
 
-    monkeypatch.setattr(app, "OPENROUTER_FALLBACK_MODEL", "openrouter/free")
     calls = []
-
-    class FakeResponse:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            return False
-        def read(self):
-            return b'{"choices":[{"message":{"content":"Hello from fallback"}}]}'
 
     def fake_urlopen(request, timeout):
         payload = json.loads(request.data.decode())
-        calls.append(payload["model"])
-        if len(calls) == 1:
-            raise HTTPError(request.full_url, 404, "Not Found", {}, BytesIO(
-                b'{"error":{"message":"0 endpoints out of 1 requested; ZDR violation (account settings)"}}'
-            ))
-        return FakeResponse()
+        calls.append(payload)
+        raise HTTPError(request.full_url, 404, "Not Found", {}, BytesIO(
+            b'{"error":{"message":"0 endpoints out of 1 requested; ZDR violation (account settings)"}}'
+        ))
 
     monkeypatch.setattr(app, "urlopen", fake_urlopen)
-    result = app._call_openrouter([{"role": "user", "content": "hello"}], "nvidia/nemotron-3.5-lightning:free", None, None)
-    assert result["choices"][0]["message"]["content"] == "Hello from fallback"
-    assert calls == ["nvidia/nemotron-3.5-lightning:free", "openrouter/free"]
+    with pytest.raises(HTTPException) as error:
+        app._call_openrouter([{"role": "user", "content": "hello"}], "upstage/solar-mini4:free", None, None)
+    assert error.value.status_code == 502
+    assert len(calls) == 1
+    assert calls[0]["provider"] == {"zdr": True, "allow_fallbacks": False}
 
 
-def test_openrouter_provider_preferences_are_configurable(app, monkeypatch):
+def test_openrouter_uses_rz_agent_privacy_routing(app, monkeypatch):
     captured = {}
 
     class FakeResponse:
@@ -134,10 +125,10 @@ def test_openrouter_provider_preferences_are_configurable(app, monkeypatch):
     monkeypatch.setattr(app, "OPENROUTER_ZDR", False)
     monkeypatch.setattr(app, "OPENROUTER_ALLOW_FALLBACKS", True)
     monkeypatch.setattr(app, "urlopen", fake_urlopen)
-    result = app._call_openrouter([{"role": "user", "content": "hello"}], "nvidia/nemotron-3.5-lightning:free", None, 100)
+    result = app._call_openrouter([{"role": "user", "content": "hello"}], "upstage/solar-mini4:free", None, 100)
 
     assert result["choices"][0]["message"]["content"] == "hello"
-    assert captured["payload"]["provider"] == {"zdr": False, "allow_fallbacks": True}
+    assert captured["payload"]["provider"] == {"zdr": True, "allow_fallbacks": False}
 
 
 def test_openrouter_conversation_memory(app, monkeypatch):

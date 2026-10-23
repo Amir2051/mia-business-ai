@@ -504,7 +504,7 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, 
     payload: dict = {
         "model": model or OPENROUTER_MODEL,
         "messages": messages,
-        "provider": {"zdr": OPENROUTER_ZDR, "allow_fallbacks": OPENROUTER_ALLOW_FALLBACKS},
+        "provider": {"zdr": True, "allow_fallbacks": False},
     }
     if temperature is not None:
         payload["temperature"] = temperature
@@ -530,38 +530,11 @@ def _call_openrouter(messages: list[dict], model: str, temperature, max_tokens, 
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read(12000).decode("utf-8", errors="replace")
-        # Account-level ZDR restrictions override per-request settings. For ordinary
-        # chat, try OpenRouter's free-model router once so a blocked endpoint does not
-        # make MIA completely unavailable. Keep tool-calling requests pinned because
-        # the router may select a model without the required tool support.
-        restricted = exc.code == 404 and any(
-            marker in body.lower()
-            for marker in ("zdr violation", "endpoints out of", "no endpoints")
-        )
-        fallback = OPENROUTER_FALLBACK_MODEL
-        if restricted and not tools and fallback and payload["model"] != fallback:
-            print("RZ_OPENROUTER_RETRY", {"reason": "endpoint_policy_or_availability", "fallback_model": fallback}, flush=True)
-            payload["model"] = fallback
-            fallback_req = URLRequest(
-                _openrouter_chat_completions_url(OPENROUTER_ENDPOINT),
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://rz-ai-agent.local",
-                    "X-Title": "RZ AI",
-                },
-                method="POST",
-            )
-            try:
-                with urlopen(fallback_req, timeout=45) as response:
-                    return json.loads(response.read().decode("utf-8"))
-            except HTTPError as fallback_exc:
-                fallback_body = fallback_exc.read(12000).decode("utf-8", errors="replace")
-                print("RZ_PROVIDER_ERROR", {"provider": "openrouter", "status": fallback_exc.code, "model": fallback, "message": fallback_body[:700]}, flush=True)
-                raise HTTPException(status_code=502, detail="OpenRouter blocked the configured model and its free-model fallback. Check OpenRouter Privacy/Guardrails ZDR restrictions or choose an eligible model.") from None
-        print("RZ_PROVIDER_ERROR", {"provider": "openrouter", "status": exc.code, "model": payload["model"], "message": body[:700]}, flush=True)
-        raise HTTPException(status_code=502, detail="OpenRouter rejected the model request. Check model availability and account Privacy/Guardrails restrictions.") from None
+        # Match the known-working RZ Agent request policy: require a ZDR endpoint
+        # and do not silently route to an alternate provider/model. Account-level
+        # training and ZDR restrictions must be respected by OpenRouter routing.
+        print("MIA_OPENROUTER_ERROR", {"status": exc.code, "model": payload["model"], "message": body[:700]}, flush=True)
+        raise HTTPException(status_code=502, detail="OpenRouter rejected the model request under the current provider/privacy policy. Check model eligibility for ZDR routing.") from None
 
 
 def _call_hermes(messages: list[dict], model: str, temperature, max_tokens) -> dict:
