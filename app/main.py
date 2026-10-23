@@ -130,6 +130,8 @@ from app.creator import create_router as _create_creator_router
 app.include_router(_create_creator_router(require_app_user))
 from app.business_documents import create_router as _create_business_documents_router
 app.include_router(_create_business_documents_router(require_app_user))
+from app.website_intelligence import create_router as _create_website_intelligence_router
+app.include_router(_create_website_intelligence_router(require_app_user))
 
 
 @app.get("/v1/auth/mode")
