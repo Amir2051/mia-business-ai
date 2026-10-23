@@ -31,14 +31,15 @@ def app(monkeypatch):
         os.environ.pop(key, None)
 
 
-def test_mia_core_identity_always_knows_rz_and_rz_agent(app):
+def test_mia_business_identity_is_customer_focused_and_approval_oriented(app):
     identity = app.ASSISTANT_IDENTITY.lower()
-    assert "computer scientist and hacker" in identity
-    assert "creator of mia and cynthara" in identity
-    assert "authored the eight books" in identity
-    assert "do not reduce rz's identity to an author" in identity
-    assert "never say he is unknown" in identity
-    assert "does not grant permission" in identity
+    assert "ai business partner inside mia business ai" in identity
+    assert "lead conversion" in identity
+    assert "never claim a message was sent" in identity
+    assert "per-user data isolation" in identity
+    assert "creating a plan or draft does not execute it" in identity
+    assert "computer scientist and hacker" not in identity
+    assert "rz collection" not in identity
 
 
 def test_placeholder_openrouter_skips_to_502(app):
