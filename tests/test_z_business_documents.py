@@ -170,3 +170,41 @@ def test_client_pipeline_rejects_invalid_stage_and_followup_date(monkeypatch, tm
     base = {'name': 'Taylor', 'expected_value': '10'}
     assert client.post('/v1/business/clients', headers=h, json={**base, 'stage': 'maybe'}).status_code == 422
     assert client.post('/v1/business/clients', headers=h, json={**base, 'next_follow_up': 'next Tuesday'}).status_code == 422
+
+def test_growth_plan_requires_auth_and_saves_updates_by_user_and_date(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    assert client.get('/v1/business/growth-plans').status_code == 401
+    h = {'X-API-Key': 'business-doc-test-key'}
+    payload = {
+        'plan_date': '2026-10-22', 'primary_goal': 'Talk to three target customers',
+        'hours_available': 4, 'success_metric': '3 customer conversations',
+        'plan_text': '# Daily plan\n1. Prepare questions\n2. Contact prospects',
+        'reflection': '', 'status': 'active',
+    }
+    first = client.post('/v1/business/growth-plans', headers=h, json=payload)
+    assert first.status_code == 200, first.text
+    assert first.json()['saved'] is True
+    edited = {**payload, 'hours_available': 3, 'plan_text': '# Revised plan',
+              'reflection': 'Reached out to two people.', 'status': 'completed'}
+    second = client.post('/v1/business/growth-plans', headers=h, json=edited)
+    assert second.status_code == 200, second.text
+    assert second.json()['plan']['status'] == 'completed'
+    listing = client.get('/v1/business/growth-plans', headers=h).json()
+    assert listing['count'] == 1
+    assert listing['plans'][0]['plan_text'] == '# Revised plan'
+    assert listing['plans'][0]['reflection'] == 'Reached out to two people.'
+    from app.business_documents import _db
+    conn = _db()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM business_growth_plans WHERE user_id=?', ('another-user',)).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_growth_plan_validates_date_goal_hours_and_length(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path); h = {'X-API-Key': 'business-doc-test-key'}
+    base = {'plan_date': '2026-02-30', 'primary_goal': 'Get customers', 'hours_available': 4, 'plan_text': 'Plan'}
+    assert client.post('/v1/business/growth-plans', headers=h, json=base).status_code == 422
+    assert client.post('/v1/business/growth-plans', headers=h, json={**base, 'plan_date':'2026-10-22', 'hours_available': 99}).status_code == 422
+    assert client.post('/v1/business/growth-plans', headers=h, json={**base, 'plan_date':'2026-10-22', 'primary_goal':'   '}).status_code == 422
+    assert client.get('/v1/business/growth-plans?limit=0', headers=h).status_code == 422

@@ -178,3 +178,8 @@ The Business overview includes a per-user business profile (business name, indus
 ## Approval center
 
 The **Approvals & integrations** page (`/tools`) exposes the existing allowlisted tool registry, per-user permissions, approval queue, and audit trail. Approval-gated writes show their exact action payload for review; a request does not execute when prepared, decisions are owner-scoped, and pending requests expire after 10 minutes. Only the listed supported actions can be executed; unsupported adapters remain unavailable.
+
+
+## Growth Assistant
+
+The Business overview includes a daily growth-planning workflow. MIA drafts a realistic, editable plan from the user's saved business profile, primary goal, available focus hours, success measure, and today's constraints. Users can save one plan per account per date, update it, record an end-of-day reflection, mark the day complete, and revisit recent plans. Plans are stored in the clone's dedicated business database and are scoped by authenticated user. Generating a plan does not send messages or execute external actions.

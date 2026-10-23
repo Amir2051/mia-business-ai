@@ -39,6 +39,12 @@ def _db():
       stage TEXT NOT NULL, expected_value TEXT NOT NULL DEFAULT '0', next_follow_up TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL,
       PRIMARY KEY(user_id,client_id))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS business_growth_plans(
+      user_id TEXT NOT NULL, plan_date TEXT NOT NULL, primary_goal TEXT NOT NULL,
+      hours_available INTEGER NOT NULL, success_metric TEXT NOT NULL DEFAULT '',
+      plan_text TEXT NOT NULL, reflection TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active', created_at REAL NOT NULL, updated_at REAL NOT NULL,
+      PRIMARY KEY(user_id,plan_date))""")
     conn.commit()
     return conn
 
@@ -69,6 +75,22 @@ def get_business_profile(user_id: str) -> dict:
         conn.close()
     keys = ("business_name", "industry", "target_customers", "offer", "goals", "brand_voice", "constraints", "updated_at")
     return dict(zip(keys, row)) if row else {**{k: "" for k in keys[:-1]}, "updated_at": None}
+
+
+class GrowthPlanSave(BaseModel):
+    plan_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    primary_goal: str = Field(min_length=1, max_length=1500)
+    hours_available: int = Field(ge=1, le=16)
+    success_metric: str = Field(default="", max_length=500)
+    plan_text: str = Field(min_length=1, max_length=12000)
+    reflection: str = Field(default="", max_length=2500)
+    status: Literal["active", "completed"] = "active"
+
+
+def _growth_dict(row):
+    return {"plan_date": row[0], "primary_goal": row[1], "hours_available": row[2],
+            "success_metric": row[3], "plan_text": row[4], "reflection": row[5],
+            "status": row[6], "created_at": row[7], "updated_at": row[8]}
 
 
 class BusinessClient(BaseModel):
@@ -194,6 +216,43 @@ def create_router(auth_dependency):
         finally:
             conn.close()
         return {"profile": {**values, "updated_at": now}, "saved": True}
+
+    @router.get("/growth-plans")
+    def list_growth_plans(limit:int=14,user:dict=Depends(auth_dependency)):
+        if not 1 <= limit <= 60:
+            raise HTTPException(status_code=422, detail="limit must be from 1 to 60")
+        conn = _db()
+        try:
+            rows = conn.execute("SELECT plan_date,primary_goal,hours_available,success_metric,plan_text,reflection,status,created_at,updated_at FROM business_growth_plans WHERE user_id=? ORDER BY plan_date DESC LIMIT ?", (str(user["id"]),limit)).fetchall()
+        finally:
+            conn.close()
+        return {"plans": [_growth_dict(row) for row in rows], "count": len(rows)}
+
+    @router.post("/growth-plans")
+    def save_growth_plan(payload:GrowthPlanSave,user:dict=Depends(auth_dependency)):
+        from datetime import date
+        try:
+            date.fromisoformat(payload.plan_date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="plan_date must be a valid calendar date") from None
+        values = payload.model_dump()
+        for key in ("primary_goal", "success_metric", "plan_text", "reflection"):
+            values[key] = values[key].strip()
+        if not values["primary_goal"] or not values["plan_text"]:
+            raise HTTPException(status_code=422, detail="Goal and plan text cannot be blank")
+        now = time.time(); uid = str(user["id"]); conn = _db()
+        try:
+            existing = conn.execute("SELECT created_at FROM business_growth_plans WHERE user_id=? AND plan_date=?", (uid, values["plan_date"])).fetchone()
+            created = existing[0] if existing else now
+            conn.execute("""INSERT INTO business_growth_plans(user_id,plan_date,primary_goal,hours_available,success_metric,plan_text,reflection,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,plan_date) DO UPDATE SET primary_goal=excluded.primary_goal,
+                hours_available=excluded.hours_available,success_metric=excluded.success_metric,plan_text=excluded.plan_text,
+                reflection=excluded.reflection,status=excluded.status,updated_at=excluded.updated_at""",
+                (uid, values["plan_date"], values["primary_goal"], values["hours_available"], values["success_metric"], values["plan_text"], values["reflection"], values["status"], created, now))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"plan": {**values, "created_at": created, "updated_at": now}, "saved": True}
 
     @router.get("/clients")
     def list_business_clients(stage:str="",user:dict=Depends(auth_dependency)):
