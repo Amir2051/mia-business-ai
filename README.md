@@ -1,6 +1,6 @@
-# RZ AI
+# MIA Business AI
 
-A small FastAPI service for a local personal AI assistant, with chat requests routed through OpenRouter.
+A business-focused clone of the MIA/RZ Agent foundation. It retains the existing model/provider routing, chat, voice, research, creator, and bounded tool capabilities while adding a business command center, per-user business profiles, and document/invoice workflows. Keep this clone’s secrets and databases separate from the original RZ Agent and SafeNestT.
 
 ## Setup
 
@@ -81,7 +81,7 @@ MCP does not add filesystem access, shell execution, or external app integration
 
 The browser UI includes authenticated workflows for document analysis, code review, memory save/list/delete, and task-plan creation/listing/step updates. Code review analyzes submitted code and does not execute it. Document uploads are limited to 3 MB and supported text, source, CSV, DOCX, and PDF formats; extracted content is bounded before it is sent to the configured model. Task plans track steps and statuses but do not autonomously execute them.
 
-Memory and task data use PostgreSQL when `DATABASE_URL` is configured. Without it, the service falls back to local SQLite at `RZ_LOCAL_DATA_PATH` (or `~/.rz-ai-agent/capabilities.sqlite3`). Local SQLite is suitable for development but may not survive restarts or replacements on an ephemeral hosting service; use a persistent PostgreSQL database for durable hosted data. The `/v1/tools` and `/v1/capabilities` endpoints report configuration status without exposing credentials.
+Memory and task data use PostgreSQL when `DATABASE_URL` is configured. Without it, the business clone falls back to local SQLite at `RZ_LOCAL_DATA_PATH` (default `~/.mia-business-ai/capabilities.sqlite3`). This default is intentionally separate from the original RZ Agent path. Local SQLite is suitable for development but may not survive restarts or replacements on an ephemeral hosting service; use a dedicated persistent PostgreSQL database for durable hosted data. Never reuse the original RZ Agent or SafeNestT `DATABASE_URL` for this clone. The `/v1/tools` and `/v1/capabilities` endpoints report configuration status without exposing credentials.
 
 Image generation uses OpenRouter's unified Image API (`POST https://openrouter.ai/api/v1/images`) with `OPENROUTER_API_KEY`. The default model is `bytedance-seed/seedream-4.5` (image generations are paid; OpenRouter's model catalog and endpoint pricing can change). Optionally override `IMAGE_GENERATION_ENDPOINT`, `IMAGE_GENERATION_API_KEY`, and `IMAGE_GENERATION_MODEL`; custom endpoints must use HTTPS and return the OpenRouter-style `data[0].b64_json` or an HTTPS image URL. The endpoint reports provider errors honestly and returns the model and usage cost when supplied.
 
@@ -118,7 +118,7 @@ Example MCP tool call after authentication:
 - `POST /v1/images/generations` accepts `{ "prompt": "..." }` and uses the shared `OPENROUTER_API_KEY` with `POST https://openrouter.ai/api/v1/images` by default. Default model: `bytedance-seed/seedream-4.5`; every generated image may incur a charge, so check current model pricing before use. You can override `IMAGE_GENERATION_ENDPOINT`, `IMAGE_GENERATION_API_KEY`, and `IMAGE_GENERATION_MODEL`. The UI displays the actual returned image and reports model/cost metadata when present; provider errors are not faked.
 - `POST /v1/documents/analyze` accepts `{ "filename": "notes.pdf", "content_base64": "...", "question": "Summarize this" }`. Upload limit is 3 MB; extracted text is capped at 40,000 characters. Supported formats include TXT, Markdown, source code, JSON, CSV, DOCX, and PDF. PDF extraction uses `pypdf`.
 - `POST /v1/code/review` accepts `{ "language": "python", "code": "...", "question": "Review this" }`. This analyzes supplied code but never executes it.
-- `GET/POST/DELETE /v1/memory` list, save, and delete explicitly saved user memories. In account-auth mode, records are scoped to the authenticated account and use the configured PostgreSQL database. Local API-key mode stores memory in SQLite at `RZ_LOCAL_DATA_PATH` or `~/.rz-ai-agent/capabilities.sqlite3`.
+- `GET/POST/DELETE /v1/memory` list, save, and delete explicitly saved user memories. In account-auth mode, records are scoped to the authenticated account and use the configured PostgreSQL database. Local API-key mode stores memory in SQLite at `RZ_LOCAL_DATA_PATH` or `~/.mia-business-ai/capabilities.sqlite3`.
 - `GET/POST /v1/tasks` and `PATCH /v1/tasks/{task_id}/steps/{step_index}` persist bounded task plans and track step status. These are task tracking primitives, not an unrestricted background agent or shell executor.
 
 All endpoints require the existing API-key or account authentication. No arbitrary shell execution or write-capable GitHub tools are added. OpenRouter routing preferences are configured with `OPENROUTER_ZDR` and `OPENROUTER_ALLOW_FALLBACKS`. The existing conversation history remains in memory; explicit saved memory and task records are stored separately.
@@ -163,3 +163,23 @@ export RZ_API_TOKEN='paste-your-scoped-token-here'
 For a one-shot prompt use `./scripts/rz-ai -m "Explain this error"`. To use a different base URL, set `RZ_AI_URL`; the default is `https://rz-ai.safenestt.com`. The CLI stores only a random conversation identifier in `~/.config/rz-ai/session` with restrictive file permissions. The API token remains in the shell environment and is never written by the client.
 
 **Important:** the terminal client sends prompts to the hosted assistant. It does not itself grant the hosted service access to your Kali shell. Local-machine command execution requires a separate, authenticated local bridge and should be enabled only with explicit command approval.
+
+## MIA Business documents and invoices
+
+The business clone adds authenticated, per-user document generation and invoice workflows under `/v1/business`. Supported document exports are PDF, DOCX, TXT, Markdown, CSV, JSON, and HTML. PDF files can be rendered in an inline preview; other formats are previewed as escaped text in the UI. Invoice line totals, discounts, tax, and final totals are calculated server-side using decimal arithmetic. Download actions send a file through the current browser so the user can save it on the device in use.
+
+Business artifacts use PostgreSQL when this clone's own `DATABASE_URL` is configured, and local SQLite at `MIA_BUSINESS_DATA_PATH` (default `~/.mia-business-ai/business.sqlite3`) for development. PostgreSQL mode creates the business tables automatically and uses the same dedicated database as this clone's account authentication. Apply `database/migrations/004_mia_business.sql` for explicit schema provisioning. Never reuse the original RZ Agent or SafeNestT `DATABASE_URL`; a hosted SQLite file on an ephemeral filesystem is not durable across host replacement. The Render blueprint is named `mia-business-ai` to avoid accidentally targeting the original RZ Agent service.
+
+
+## Business profile and personalization
+
+The Business overview includes a per-user business profile (business name, industry, target customers, offer, goals, brand voice, and constraints). The Client pipeline provides a lightweight owner-scoped CRM for contact details, pipeline stage, expected deal value, next follow-up date, and notes; it does not send messages or contact clients. The profile is stored in the dedicated `MIA_BUSINESS_DATA_PATH` database and is added as reference context to new MIA chat requests. It does not override safety, privacy, or truthfulness rules. General tone, language, and response-depth settings remain available under **Customize MIA**.
+
+## Approval center
+
+The **Approvals & integrations** page (`/tools`) exposes the existing allowlisted tool registry, per-user permissions, approval queue, and audit trail. Approval-gated writes show their exact action payload for review; a request does not execute when prepared, decisions are owner-scoped, and pending requests expire after 10 minutes. Only the listed supported actions can be executed; unsupported adapters remain unavailable.
+
+
+## Growth Assistant
+
+The Business overview includes a daily growth-planning workflow. MIA drafts a realistic, editable plan from the user's saved business profile, primary goal, available focus hours, success measure, and today's constraints. Users can save one plan per account per date, update it, record an end-of-day reflection, mark the day complete, and revisit recent plans. Plans are stored in the clone's dedicated business database and are scoped by authenticated user. Generating a plan does not send messages or execute external actions.
