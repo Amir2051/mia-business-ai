@@ -228,6 +228,8 @@ def _derive_profile(pages: list[dict], domain: str):
     if not business_name: business_name = re.split(r"\s+[|–—-]\s+", title, maxsplit=1)[0].strip()[:180]
     description = clean(primary.get("description"), 1000) or clean(meta.get("description") or meta.get("og:description"), 1000)
     if not description: description = next((clean(p.get("meta", {}).get("description"), 1000) for p in pages if p.get("meta", {}).get("description")), "")
+    # Strip likely CMS-generated crawl/page-count boilerplate from SEO descriptions.
+    description = re.sub(r"\s+in\s+\d+\s+pages?\s+(?=(?:for|of|about)\b)", " ", description, flags=re.I).strip(" .")
 
     def jsonld_values(key):
         values = []
