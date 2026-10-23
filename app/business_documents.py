@@ -63,6 +63,10 @@ def _db():
               plan_text TEXT NOT NULL, reflection TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT 'active', created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
               PRIMARY KEY(user_id,plan_date))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS business_client_activities(
+              user_id TEXT NOT NULL, activity_id TEXT NOT NULL, client_id TEXT NOT NULL,
+              activity_type TEXT NOT NULL, summary TEXT NOT NULL, next_step TEXT NOT NULL DEFAULT '',
+              created_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(user_id,activity_id))""")
             conn.commit()
             return conn
         except Exception:
@@ -97,6 +101,10 @@ def _db():
       plan_text TEXT NOT NULL, reflection TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'active', created_at REAL NOT NULL, updated_at REAL NOT NULL,
       PRIMARY KEY(user_id,plan_date))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS business_client_activities(
+      user_id TEXT NOT NULL, activity_id TEXT NOT NULL, client_id TEXT NOT NULL,
+      activity_type TEXT NOT NULL, summary TEXT NOT NULL, next_step TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL, PRIMARY KEY(user_id,activity_id))""")
     conn.commit()
     return conn
 
@@ -160,6 +168,12 @@ def _client_dict(row):
     return {"id": row[0], "name": row[1], "company": row[2], "email": row[3], "phone": row[4],
             "stage": row[5], "expected_value": row[6], "next_follow_up": row[7], "notes": row[8],
             "created_at": row[9], "updated_at": row[10]}
+
+
+class ClientActivityCreate(BaseModel):
+    activity_type: Literal["call", "email", "meeting", "proposal", "note"] = "note"
+    summary: str = Field(min_length=1, max_length=1500)
+    next_step: str = Field(default="", max_length=500)
 
 
 class InvoiceItem(BaseModel):
@@ -404,13 +418,44 @@ def create_router(auth_dependency):
             conn.close()
         return {"client": {"id":client_id,**{k:values[k] for k in ("name","company","email","phone","stage","expected_value","next_follow_up","notes")},"updated_at":now}}
 
+    @router.get("/clients/{client_id}/activities")
+    def list_client_activities(client_id:str,user:dict=Depends(auth_dependency)):
+        if not re.fullmatch(r"[a-f0-9]{32}", client_id):
+            raise HTTPException(status_code=400, detail="Invalid client id")
+        uid=str(user["id"]); conn=_db()
+        try:
+            owner=conn.execute("SELECT 1 FROM business_clients WHERE user_id=? AND client_id=?",(uid,client_id)).fetchone()
+            if not owner: raise HTTPException(status_code=404,detail="Client not found")
+            rows=conn.execute("SELECT activity_id,activity_type,summary,next_step,created_at FROM business_client_activities WHERE user_id=? AND client_id=? ORDER BY created_at DESC LIMIT 100",(uid,client_id)).fetchall()
+        finally: conn.close()
+        return {"activities":[{"id":r[0],"type":r[1],"summary":r[2],"next_step":r[3],"created_at":r[4]} for r in rows],"count":len(rows)}
+
+    @router.post("/clients/{client_id}/activities")
+    def create_client_activity(client_id:str,payload:ClientActivityCreate,user:dict=Depends(auth_dependency)):
+        if not re.fullmatch(r"[a-f0-9]{32}", client_id):
+            raise HTTPException(status_code=400, detail="Invalid client id")
+        uid=str(user["id"]); summary=payload.summary.strip(); next_step=payload.next_step.strip()
+        if not summary: raise HTTPException(status_code=422,detail="Activity summary cannot be blank")
+        aid=uuid.uuid4().hex; now=time.time(); conn=_db()
+        try:
+            owner=conn.execute("SELECT 1 FROM business_clients WHERE user_id=? AND client_id=?",(uid,client_id)).fetchone()
+            if not owner: raise HTTPException(status_code=404,detail="Client not found")
+            conn.execute("INSERT INTO business_client_activities(user_id,activity_id,client_id,activity_type,summary,next_step,created_at) VALUES(?,?,?,?,?,?,?)",(uid,aid,client_id,payload.activity_type,summary,next_step,now))
+            if next_step:
+                conn.execute("UPDATE business_clients SET notes=CASE WHEN notes='' THEN ? ELSE notes || ? END,updated_at=? WHERE user_id=? AND client_id=?",(f"Next step: {next_step}",f"\nNext step: {next_step}",now,uid,client_id))
+            conn.commit()
+        finally: conn.close()
+        return {"activity":{"id":aid,"type":payload.activity_type,"summary":summary,"next_step":next_step,"created_at":now},"saved":True}
+
     @router.delete("/clients/{client_id}")
     def delete_business_client(client_id:str,user:dict=Depends(auth_dependency)):
         if not re.fullmatch(r"[a-f0-9]{32}", client_id):
             raise HTTPException(status_code=400, detail="Invalid client id")
         conn = _db()
         try:
-            cur = conn.execute("DELETE FROM business_clients WHERE user_id=? AND client_id=?", (str(user["id"]), client_id)); conn.commit()
+            uid=str(user["id"])
+            conn.execute("DELETE FROM business_client_activities WHERE user_id=? AND client_id=?",(uid,client_id))
+            cur = conn.execute("DELETE FROM business_clients WHERE user_id=? AND client_id=?", (uid, client_id)); conn.commit()
         finally:
             conn.close()
         if not cur.rowcount:

@@ -268,3 +268,37 @@ def test_business_overview_aggregates_owner_scoped_pipeline_and_followups(monkey
         assert conn.execute('SELECT COUNT(*) FROM business_clients WHERE user_id=?', ('another-user',)).fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_client_activity_history_is_private_and_records_next_step(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    created = client.post('/v1/business/clients', headers=h, json={
+        'name': 'Morgan Lee', 'company': 'Solo Co', 'stage': 'contacted',
+        'expected_value': '1200',
+    })
+    assert created.status_code == 200, created.text
+    cid = created.json()['client']['id']
+    path = f'/v1/business/clients/{cid}/activities'
+    assert client.get(path).status_code == 401
+    logged = client.post(path, headers=h, json={
+        'activity_type': 'call', 'summary': 'Discussed onboarding needs.',
+        'next_step': 'Send a proposal draft for review',
+    })
+    assert logged.status_code == 200, logged.text
+    assert logged.json()['saved'] is True
+    history = client.get(path, headers=h)
+    assert history.status_code == 200
+    assert history.json()['count'] == 1
+    assert history.json()['activities'][0]['type'] == 'call'
+    assert history.json()['activities'][0]['next_step'] == 'Send a proposal draft for review'
+    from app.business_documents import _db
+    conn = _db()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM business_client_activities WHERE user_id=?', ('another-user',)).fetchone()[0] == 0
+        note = conn.execute('SELECT notes FROM business_clients WHERE user_id=? AND client_id=?', ('local', cid)).fetchone()[0]
+        assert 'Next step: Send a proposal draft for review' in note
+    finally:
+        conn.close()
+    assert client.get(f'/v1/business/clients/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/activities', headers=h).status_code == 404
+    assert client.post(path, headers=h, json={'activity_type':'email','summary':'   '}).status_code == 422
