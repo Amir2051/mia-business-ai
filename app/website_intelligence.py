@@ -328,6 +328,7 @@ class WebsiteScanRequest(BaseModel):
 
 class WebsiteProfileApproval(BaseModel):
     fields: list[str] = Field(default_factory=lambda: list(PROFILE_FIELDS), max_length=len(PROFILE_FIELDS))
+    overrides: dict[str, str] = Field(default_factory=dict)
 
 
 def create_router(auth_dependency):
@@ -381,10 +382,12 @@ def create_router(auth_dependency):
         if not pages:
             raise HTTPException(status_code=422, detail="MIA could not read public HTML pages from this website. It may block automated access or require JavaScript.")
         domain = root_host
-        profile = _derive_profile(pages, domain)
+        profile, facts, inventory = _derive_profile(pages, domain)
         scan_id, now = uuid.uuid4().hex, time.time()
         # Persist bounded page evidence and extracted candidate fields for this account only.
-        safe_pages = [{"url": p["url"], "title": p["title"], "text": p["text"][:8000], "meta": p["meta"]} for p in pages]
+        safe_pages = [{"url": p["url"], "title": p["title"], "text": p["text"][:8000],
+                       "meta": p["meta"], "page_type": p.get("page_type", "other"),
+                       "headings": p.get("headings", [])[:40]} for p in pages]
         conn = _db()
         try:
             _ensure_table(conn)
@@ -395,9 +398,9 @@ def create_router(auth_dependency):
             conn.close()
         return {
             "scan_id": scan_id, "domain": domain, "status": "review",
-            "pages_crawled": len(pages), "pages": [{"url": p["url"], "title": p["title"]} for p in pages],
-            "profile_suggestions": profile,
-            "sources": [{"url": p["url"], "title": p["title"]} for p in pages],
+            "pages_crawled": len(pages), "pages": inventory,
+            "profile_suggestions": profile, "business_facts": facts,
+            "sources": inventory,
             "warnings": errors[:20],
             "note": "Extracted content is unverified until you review and approve it. Pages may contain inaccurate or outdated claims.",
         }
@@ -424,8 +427,11 @@ def create_router(auth_dependency):
         if not re.fullmatch(r"[a-f0-9]{32}", scan_id):
             raise HTTPException(status_code=400, detail="Invalid scan id")
         selected = set(payload.fields)
-        if not selected.issubset(PROFILE_FIELDS):
+        if not selected.issubset(PROFILE_FIELDS) or not set(payload.overrides).issubset(PROFILE_FIELDS):
             raise HTTPException(status_code=422, detail="Unsupported profile field")
+        for key, value in payload.overrides.items():
+            if not isinstance(value, str) or len(value) > PROFILE_FIELDS[key]:
+                raise HTTPException(status_code=422, detail=f"Invalid value for {key}")
         conn = _db()
         try:
             _ensure_table(conn)
@@ -437,6 +443,8 @@ def create_router(auth_dependency):
                 raise HTTPException(status_code=409, detail="This scan has already been approved")
             candidate = json.loads(row[2])
             existing = get_business_profile(str(user["id"]))
+            for key, value in payload.overrides.items():
+                candidate[key] = value.strip()
             merged = {k: (candidate.get(k, "") if k in selected and candidate.get(k, "") else existing.get(k, "")) for k in PROFILE_FIELDS}
             now = time.time()
             conn.execute("""INSERT INTO business_profiles(user_id,business_name,industry,target_customers,offer,goals,brand_voice,constraints,updated_at)
