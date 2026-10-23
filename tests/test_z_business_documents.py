@@ -302,3 +302,24 @@ def test_client_activity_history_is_private_and_records_next_step(monkeypatch, t
         conn.close()
     assert client.get(f'/v1/business/clients/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/activities', headers=h).status_code == 404
     assert client.post(path, headers=h, json={'activity_type':'email','summary':'   '}).status_code == 422
+
+
+def test_business_overview_reports_stage_counts_and_closed_win_rate(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    for name, stage in [('Win One','won'), ('Win Two','won'), ('Lost One','lost'), ('Open One','qualified')]:
+        response = client.post('/v1/business/clients', headers=h, json={'name':name,'stage':stage,'expected_value':'100'})
+        assert response.status_code == 200, response.text
+    data = client.get('/v1/business/overview', headers=h).json()
+    assert data['stage_counts']['won'] == 2
+    assert data['stage_counts']['lost'] == 1
+    assert data['stage_counts']['qualified'] == 1
+    assert data['closed_deals'] == 3
+    assert data['closed_win_rate_percent'] == 66.7
+
+
+def test_business_overview_win_rate_is_undefined_without_closed_deals(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    data = client.get('/v1/business/overview', headers={'X-API-Key':'business-doc-test-key'}).json()
+    assert data['closed_deals'] == 0
+    assert data['closed_win_rate_percent'] is None

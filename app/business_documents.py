@@ -288,6 +288,9 @@ def create_router(auth_dependency):
             conn.close()
         active = [r for r in clients if r[3] not in {"won", "lost"}]
         pipeline = sum((Decimal(r[4] or "0") for r in active), Decimal("0"))
+        stage_counts = {stage: sum(1 for r in clients if r[3] == stage) for stage in ("lead", "contacted", "qualified", "proposal", "won", "lost")}
+        closed = stage_counts["won"] + stage_counts["lost"]
+        closed_win_rate = round(stage_counts["won"] * 100 / closed, 1) if closed else None
         due = [r for r in active if r[5] and r[5] <= today]
         upcoming = [r for r in active if r[5] and today < r[5] <= next_week]
         followups = due + upcoming
@@ -295,7 +298,10 @@ def create_router(auth_dependency):
             "as_of": today,
             "clients_total": len(clients),
             "active_leads": len(active),
-            "won_clients": sum(1 for r in clients if r[3] == "won"),
+            "won_clients": stage_counts["won"],
+            "stage_counts": stage_counts,
+            "closed_deals": closed,
+            "closed_win_rate_percent": closed_win_rate,
             "open_pipeline_value": str(pipeline.quantize(Decimal("0.01"))),
             "followups_due": len(due),
             "followups_next_7_days": len(upcoming),
