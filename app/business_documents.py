@@ -389,9 +389,10 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
     plain = content.replace("\r", "")
     # AI output often starts with a title such as "SafeNestT Invoice Proposal",
     # so do not require the word Invoice to occupy an entire line.
-    if not re.search(r"(?i)\binvoice\b", plain):
-        return None
-    if not re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services|Client Information|Products/Services Included", plain):
+    is_invoice = bool(re.search(r"(?i)\binvoice\b", title + "\n" + plain))
+    is_proposal = bool(re.search(r"(?i)\bproposal\b", title + "\n" + plain))
+    has_service_sections = bool(re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services|Client Information|Products/Services Included|Services Offered", plain))
+    if not (is_invoice and has_service_sections) and not (is_proposal and re.search(r"(?i)Services Offered|Pricing Information", plain)):
         return None
 
     invoice_to = re.split(r"(?i)Invoice To:\s*", plain, maxsplit=1)[-1]
@@ -468,6 +469,17 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
                 name = match.group(1).strip()
                 description = name + (": " + desc_match.group(1).strip() if desc_match else "")
                 data["items"].append({"description": description, "quantity": "—", "unit_price": "—", "amount": "—"})
+    if not data["items"]:
+        # Proposal documents commonly use "**Service:** description" bullets under
+        # "Services Offered", rather than invoice-style numbered service blocks.
+        offered = re.split(r"(?i)Services Offered\*{0,2}\s*", plain, maxsplit=1)
+        if len(offered) > 1:
+            offered = re.split(r"(?im)^\s*\*{0,2}\s*\d+\.\s*(?:Proposal Highlights|Pricing Information|Terms and Conditions)", offered[1], maxsplit=1)[0]
+            for match in re.finditer(r"(?im)^\s*[-*]\s*\*{0,2}([^:*\n]+):\*{0,2}\s*(.*)$", offered):
+                name = re.sub(r"\*+", "", match.group(1)).strip()
+                detail = re.sub(r"\*+", "", match.group(2)).strip()
+                if name and detail:
+                    data["items"].append({"description": name + ": " + detail, "quantity": "—", "unit_price": "—", "amount": "—"})
     if not data["items"]:
         # Some models render service names as bold bullets rather than numbered sections.
         for match in re.finditer(r"(?im)^\s*[-*]\s*\*\*([^*]+)\*\*\s*$", plain):
