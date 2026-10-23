@@ -25,19 +25,19 @@ services:
       - key: OPENROUTER_FALLBACK_MODEL
         value: openrouter/free
       - key: OPENROUTER_MODEL
-        value: nvidia/nemotron-3.5-lightning:free
+        value: upstage/solar-mini4:free
       - key: OLLAMA_BASE_URL
         sync: false
       - key: OLLAMA_MODEL
         value: qwen3:1.7b
       - key: OPENROUTER_CODING_MODEL
-        value: nvidia/nemotron-3.5-lightning:free
+        value: upstage/solar-mini4:free
       - key: OPENROUTER_ANALYSIS_MODEL
-        value: nvidia/nemotron-3.5-lightning:free
+        value: upstage/solar-mini4:free
       - key: OPENROUTER_ZDR
-        value: "false"
-      - key: OPENROUTER_ALLOW_FALLBACKS
         value: "true"
+      - key: OPENROUTER_ALLOW_FALLBACKS
+        value: "false"
       - key: DATABASE_URL
         sync: false
       - key: APP_ORIGIN
