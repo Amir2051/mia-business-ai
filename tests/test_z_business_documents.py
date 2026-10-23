@@ -229,3 +229,42 @@ def test_postgres_compat_connection_translates_sqlite_placeholders():
     assert raw.call == ('SELECT * FROM t WHERE a=%s AND b=%s LIMIT %s', ('x', 'y', 5))
     assert conn.commit() == 'committed'
     assert conn.close() == 'closed'
+
+
+def test_business_overview_aggregates_owner_scoped_pipeline_and_followups(monkeypatch, tmp_path):
+    from datetime import date, timedelta
+    _, client = _client(monkeypatch, tmp_path)
+    h = {'X-API-Key': 'business-doc-test-key'}
+    assert client.get('/v1/business/overview').status_code == 401
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    next_week = (date.today() + timedelta(days=3)).isoformat()
+    for payload in [
+        {'name':'Overdue Prospect','stage':'qualified','expected_value':'1500','next_follow_up':yesterday},
+        {'name':'Upcoming Prospect','stage':'proposal','expected_value':'2500','next_follow_up':next_week},
+        {'name':'Closed Won','stage':'won','expected_value':'9000','next_follow_up':today},
+        {'name':'Lost Prospect','stage':'lost','expected_value':'700','next_follow_up':today},
+    ]:
+        made = client.post('/v1/business/clients', headers=h, json=payload)
+        assert made.status_code == 200, made.text
+    doc = client.post('/v1/business/files', headers=h, json={'title':'Proposal','content':'Scope','format':'txt'})
+    assert doc.status_code == 200
+    invoice = client.post('/v1/business/invoices', headers=h, json={'customer_name':'Client','items':[{'description':'Consulting','quantity':'1','unit_price':'125'}]})
+    assert invoice.status_code == 200
+    overview = client.get('/v1/business/overview', headers=h)
+    assert overview.status_code == 200, overview.text
+    data = overview.json()
+    assert data['active_leads'] == 2
+    assert data['won_clients'] == 1
+    assert data['open_pipeline_value'] == '4000.00'
+    assert data['followups_due'] == 1
+    assert data['followups_next_7_days'] == 1
+    assert data['documents_total'] == 2
+    assert data['invoices_total'] == 1
+    assert len(data['followups']) == 2
+    from app.business_documents import _db
+    conn = _db()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM business_clients WHERE user_id=?', ('another-user',)).fetchone()[0] == 0
+    finally:
+        conn.close()

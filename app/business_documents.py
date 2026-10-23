@@ -248,6 +248,50 @@ def _file_row(user_id: str, fid: str):
 
 def create_router(auth_dependency):
     router=APIRouter(prefix="/v1/business",tags=["MIA Business Documents"])
+
+    @router.get("/overview")
+    def business_overview(user:dict=Depends(auth_dependency)):
+        """Return owner-scoped business KPIs and actionable follow-ups."""
+        from datetime import date, timedelta
+        uid = str(user["id"])
+        today = date.today().isoformat()
+        next_week = (date.today() + timedelta(days=7)).isoformat()
+        conn = _db()
+        try:
+            clients = conn.execute(
+                "SELECT client_id,name,company,stage,expected_value,next_follow_up FROM business_clients WHERE user_id=? ORDER BY CASE WHEN next_follow_up='' THEN 1 ELSE 0 END, next_follow_up ASC, updated_at DESC",
+                (uid,),
+            ).fetchall()
+            file_counts = conn.execute(
+                "SELECT COUNT(*), SUM(CASE WHEN kind='invoice' THEN 1 ELSE 0 END) FROM business_files WHERE user_id=?",
+                (uid,),
+            ).fetchone()
+            plans = conn.execute(
+                "SELECT COUNT(*), SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) FROM business_growth_plans WHERE user_id=?",
+                (uid,),
+            ).fetchone()
+        finally:
+            conn.close()
+        active = [r for r in clients if r[3] not in {"won", "lost"}]
+        pipeline = sum((Decimal(r[4] or "0") for r in active), Decimal("0"))
+        due = [r for r in active if r[5] and r[5] <= today]
+        upcoming = [r for r in active if r[5] and today < r[5] <= next_week]
+        followups = due + upcoming
+        return {
+            "as_of": today,
+            "clients_total": len(clients),
+            "active_leads": len(active),
+            "won_clients": sum(1 for r in clients if r[3] == "won"),
+            "open_pipeline_value": str(pipeline.quantize(Decimal("0.01"))),
+            "followups_due": len(due),
+            "followups_next_7_days": len(upcoming),
+            "documents_total": int(file_counts[0] or 0),
+            "invoices_total": int(file_counts[1] or 0),
+            "growth_plans_total": int(plans[0] or 0),
+            "growth_plans_completed": int(plans[1] or 0),
+            "followups": [{"id": r[0], "name": r[1], "company": r[2], "stage": r[3], "expected_value": str(r[4] or "0"), "next_follow_up": r[5]} for r in followups[:8]],
+        }
+
     @router.get("/profile")
     def read_business_profile(user:dict=Depends(auth_dependency)):
         return {"profile": get_business_profile(str(user["id"]))}
