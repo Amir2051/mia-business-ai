@@ -404,7 +404,7 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
         if not match:
             return default
         value = re.sub(r"\*+", "", match.group(1)).strip().strip("[]").strip()
-        if not value or re.search(r"placeholder|not provided|to be filled|your business", value, re.I):
+        if not value or re.search(r"placeholder|not provided|to be filled|your business|^insert\\b|^(?:client name|contact details|address|amount|due date|number|late fee(?: percentage)?|contact email|contact phone(?: number)?|contact information)$", value, re.I):
             return ""
         return value
 
