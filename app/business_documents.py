@@ -387,8 +387,13 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
     if not re.search(r"(?i)Invoice To:|Invoice From:|Bill To:|Description of Services", plain):
         return None
 
-    def field(pattern: str, default: str = "") -> str:
-        match = re.search(pattern, plain, re.I | re.M)
+    invoice_to = re.split(r"(?i)Invoice To:\\s*", plain, maxsplit=1)[-1]
+    invoice_to = re.split(r"(?i)Invoice From:|Invoice Number:", invoice_to, maxsplit=1)[0]
+    invoice_from = re.split(r"(?i)Invoice From:\\s*", plain, maxsplit=1)[-1]
+    invoice_from = re.split(r"(?i)Invoice Number:|Description of Services", invoice_from, maxsplit=1)[0]
+
+    def field(pattern: str, default: str = "", source: str = plain) -> str:
+        match = re.search(pattern, source, re.I | re.M)
         if not match:
             return default
         value = re.sub(r"\*+", "", match.group(1)).strip().strip("[]").strip()
@@ -398,13 +403,13 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
 
     data = {
         "business_name": field(r"Business Name:\s*([^\n]+)", "SafeNestT"),
-        "business_email": field(r"(?:Business )?Email:\s*([^\n]+)"),
-        "business_phone": field(r"(?:Business )?Phone:\s*([^\n]+)"),
-        "business_address": field(r"(?:Business )?Address:\s*([^\n]+)"),
-        "customer_name": field(r"Client Name:\s*([^\n]+)"),
-        "customer_email": field(r"Email:\s*([^\n]+)"),
-        "customer_phone": field(r"Phone:\s*([^\n]+)"),
-        "customer_address": field(r"Address:\s*([^\n]+)"),
+        "business_email": field(r"Email:\s*([^\n]+)", source=invoice_from),
+        "business_phone": field(r"Phone:\s*([^\n]+)", source=invoice_from),
+        "business_address": field(r"Address:\s*([^\n]+)", source=invoice_from),
+        "customer_name": field(r"Client Name:\s*([^\n]+)", source=invoice_to),
+        "customer_email": field(r"Email:\s*([^\n]+)", source=invoice_to),
+        "customer_phone": field(r"Phone:\s*([^\n]+)", source=invoice_to),
+        "customer_address": field(r"Address:\s*([^\n]+)", source=invoice_to),
         "invoice_number": field(r"Invoice Number:\s*([^\n]+)") or "DRAFT",
         "issue_date": field(r"Invoice Date:\s*([^\n]+)") or "Not specified",
         "due_date": field(r"Due Date:\s*([^\n]+)") or "Not specified",
