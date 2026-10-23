@@ -41,44 +41,73 @@ class _PageParser(HTMLParser):
         self.parts = []
         self.links = []
         self.title = []
-        self._in_title = False
-        self._skip = 0
+        self.headings = []
         self.meta = {}
-        self.canonical = ""
+        self.structured = []
+        self._in_title = False
+        self._heading_level = 0
+        self._in_jsonld = False
+        self._jsonld_parts = []
+        self._skip_stack = []
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
-        if tag in {"script", "style", "noscript", "svg", "iframe", "nav", "footer"}:
-            self._skip += 1
+        inherited_skip = self._skip_stack[-1] if self._skip_stack else False
+        own_skip = tag in {"script", "style", "noscript", "svg", "iframe", "nav", "footer"}
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self._skip_stack.append(inherited_skip or own_skip)
         if tag == "title":
             self._in_title = True
-        if tag == "meta" and a.get("name", "").lower() in {"description", "keywords"}:
-            self.meta[a["name"].lower()] = a.get("content", "")[:1000]
-        if tag == "meta" and a.get("property", "").lower() in {"og:site_name", "og:description", "og:title"}:
-            self.meta[a["property"].lower()] = a.get("content", "")[:1000]
+        if tag in {"h1", "h2", "h3"}:
+            self._heading_level = int(tag[1])
+            self.parts.append("\n")
+        if tag == "script" and a.get("type", "").lower() == "application/ld+json":
+            self._in_jsonld = True
+            self._jsonld_parts = []
+        if tag == "meta":
+            key = (a.get("name") or a.get("property") or "").lower()
+            if key in {"description", "keywords", "og:site_name", "og:description", "og:title", "og:type", "og:url"}:
+                self.meta[key] = a.get("content", "")[:1500]
         if tag == "link" and "canonical" in a.get("rel", "").lower():
-            self.canonical = a.get("href", "")[:2000]
+            self.meta["canonical"] = a.get("href", "")[:2000]
         if tag == "a" and a.get("href"):
             self.links.append((a["href"][:2000], " ".join(a.get("title", "").split())[:180]))
-        if tag in {"br", "p", "div", "li", "h1", "h2", "h3", "section", "article"}:
+        if tag in {"br", "p", "div", "li", "h1", "h2", "h3", "h4", "section", "article", "address"}:
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
         if tag == "title":
             self._in_title = False
-        if tag in {"script", "style", "noscript", "svg", "iframe", "nav", "footer"} and self._skip:
-            self._skip -= 1
-        if tag in {"p", "div", "li", "h1", "h2", "h3", "section", "article"}:
+        if tag in {"h1", "h2", "h3"}:
+            self._heading_level = 0
+            self.parts.append("\n")
+        if tag == "script" and self._in_jsonld:
+            try:
+                value = json.loads("".join(self._jsonld_parts).strip())
+                self.structured.extend(value if isinstance(value, list) else [value])
+            except (ValueError, TypeError):
+                pass
+            self._in_jsonld = False
+            self._jsonld_parts = []
+        if self._skip_stack:
+            self._skip_stack.pop()
+        if tag in {"p", "div", "li", "h4", "section", "article", "address"}:
             self.parts.append("\n")
 
     def handle_data(self, data):
         if self._in_title:
             self.title.append(data)
-        if not self._skip:
-            text = " ".join(data.split())
-            if text:
-                self.parts.append(text)
-
+        if self._in_jsonld:
+            self._jsonld_parts.append(data)
+        skipped = self._skip_stack[-1] if self._skip_stack else False
+        if self._heading_level and not skipped:
+            heading = " ".join(data.split())
+            if heading:
+                self.headings.append(heading[:200])
+        if not skipped and not self._in_jsonld and not self._in_title:
+            value = " ".join(data.split())
+            if value:
+                self.parts.append(value)
 
 def _validate_public_url(url: str) -> str:
     parsed = urlparse(url)
@@ -129,56 +158,161 @@ def _fetch_page(url: str):
         return url, "", [], "Could not fetch page"
 
 
+def _flatten_jsonld(value):
+    found = []
+    if isinstance(value, dict):
+        found.append(value)
+        graph = value.get("@graph")
+        if isinstance(graph, list):
+            for item in graph:
+                found.extend(_flatten_jsonld(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_flatten_jsonld(item))
+    return found
+
+
+def _page_type(url: str, title: str, text: str) -> str:
+    value = (url + " " + title).lower()
+    if re.search(r"privacy|cookie|acceptable-use|terms|refund|legal|gdpr", value): return "policy"
+    if re.search(r"contact|location|hours|reach-us", value): return "contact"
+    if re.search(r"pricing|price|plans|packages|rates", value): return "pricing"
+    if re.search(r"service|solution|offering|product", value): return "services"
+    if re.search(r"about|company[-_ ]?profile|company|team|who-we-are", value): return "about"
+    if re.search(r"faq|frequently-asked", value): return "faq"
+    if re.search(r"blog|news|article|post/", value): return "article"
+    if urlparse(url).path.strip("/").lower() in {"", "home", "index", "index.html"} or re.search(r"\bhome\b", title, re.I): return "home"
+    return "other"
+
+
 def _extract(url: str, raw_html: str):
     parser = _PageParser()
-    try:
-        parser.feed(raw_html)
-    except Exception:
-        pass
-    text = re.sub(r"[ \t]+", " ", " ".join(parser.parts))
-    text = re.sub(r"\n\s*\n+", "\n", text).strip()[:20_000]
+    try: parser.feed(raw_html)
+    except Exception: pass
+    text = "\n".join(" ".join(part.split()) for part in parser.parts if part.strip())
+    text = re.sub(r"\n{2,}", "\n", text).strip()[:20_000]
     title = " ".join(" ".join(parser.title).split())[:250]
     links = []
+    contact_hrefs = [href for href, _ in parser.links if href.lower().startswith(("mailto:", "tel:"))]
+    root_host = (urlparse(url).hostname or "").lower()
     for href, label in parser.links:
         absolute = urldefrag(urljoin(url, href))[0]
         parsed = urlparse(absolute)
-        if parsed.scheme in {"http", "https"} and parsed.hostname == urlparse(url).hostname:
-            if any(term in (absolute + " " + label).lower() for term in (
-                "about", "service", "pricing", "price", "contact", "faq", "team",
-                "company", "location", "area", "hours", "policy", "booking", "home"
-            )):
+        target = (absolute + " " + label).lower()
+        if parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() == root_host:
+            if re.search(r"privacy|cookie|acceptable-use|terms|refund|legal|gdpr", target): continue
+            if any(term in target for term in ("about", "service", "pricing", "price", "contact", "faq", "team", "company", "location", "area", "hours", "booking", "home", "product", "solution", "package", "quote", "support")):
                 links.append(absolute)
-    return {
-        "url": url,
-        "title": title,
-        "text": text,
-        "meta": parser.meta,
-        "links": list(dict.fromkeys(links)),
-    }
+    structured = []
+    for item in parser.structured: structured.extend(_flatten_jsonld(item))
+    return {"url": url, "title": title, "text": text, "headings": list(dict.fromkeys(parser.headings))[:80], "meta": parser.meta, "structured": structured[:50], "contact_hrefs": contact_hrefs, "page_type": _page_type(url, title, text), "links": list(dict.fromkeys(links))}
 
 
 def _derive_profile(pages: list[dict], domain: str):
-    home = pages[0] if pages else {"title": "", "text": "", "meta": {}}
-    all_text = "\n".join(f"{p.get('title','')}\n{p.get('text','')}" for p in pages)
-    site_name = home.get("meta", {}).get("og:site_name", "")
-    title = home.get("meta", {}).get("og:title", "") or home.get("title", "")
-    description = home.get("meta", {}).get("description", "") or home.get("meta", {}).get("og:description", "")
-    business_name = site_name or re.split(r"\s+[|–—-]\s+", title, maxsplit=1)[0]
-    if not business_name:
-        business_name = domain.split(".")[0].replace("-", " ").replace("_", " ").title()
-    # Suggestions only; no industry/customer assumptions are fabricated.
+    def clean(value, limit=500):
+        if isinstance(value, list): value = ", ".join(str(x) for x in value if x)
+        if isinstance(value, dict): value = value.get("name") or value.get("streetAddress") or ""
+        return " ".join(str(value or "").split())[:limit]
+
+    business_nodes = []
+    for page in pages:
+        for node in page.get("structured", []):
+            kind = node.get("@type", [])
+            if isinstance(kind, str): kind = [kind]
+            if any(x in {"Organization", "LocalBusiness", "ProfessionalService", "Store", "Corporation", "Person"} for x in kind): business_nodes.append(node)
+    home = next((p for p in pages if p.get("page_type") == "home"), pages[0] if pages else {"title":"", "text":"", "meta":{}})
+    meta = home.get("meta", {})
+    primary = business_nodes[0] if business_nodes else {}
+    title = meta.get("og:title", "") or home.get("title", "")
+    business_name = clean(primary.get("name"), 180) or clean(meta.get("og:site_name"), 180)
+    if not business_name: business_name = re.split(r"\s+[|–—-]\s+", title, maxsplit=1)[0].strip()[:180]
+    description = clean(primary.get("description"), 1000) or clean(meta.get("description") or meta.get("og:description"), 1000)
+    if not description: description = next((clean(p.get("meta", {}).get("description"), 1000) for p in pages if p.get("meta", {}).get("description")), "")
+
+    def jsonld_values(key):
+        values = []
+        for node in business_nodes:
+            value = node.get(key)
+            if key == "address" and isinstance(value, dict): value = ", ".join(clean(value.get(k), 160) for k in ("streetAddress", "addressLocality", "addressRegion", "postalCode", "addressCountry") if value.get(k))
+            elif key == "contactPoint" and isinstance(value, (dict, list)):
+                nodes = value if isinstance(value, list) else [value]
+                value = ", ".join(clean(n.get("telephone") or n.get("email"), 180) for n in nodes if isinstance(n, dict))
+            elif key == "openingHours" and isinstance(value, list): value = ", ".join(clean(x, 100) for x in value)
+            elif isinstance(value, dict): value = value.get("name", "")
+            if value: values.append(clean(value, 600))
+        return list(dict.fromkeys(values))
+
+    all_structured = [node for page in pages for root in page.get("structured", []) for node in _flatten_jsonld(root)]
+    faq_evidence = []
+    for node in all_structured:
+        kind = node.get("@type", [])
+        if isinstance(kind, str): kind = [kind]
+        if "FAQPage" in kind:
+            for item in node.get("mainEntity", []) if isinstance(node.get("mainEntity", []), list) else []:
+                if isinstance(item, dict):
+                    question = item.get("name", "")
+                    answer = item.get("acceptedAnswer", {})
+                    answer = answer.get("text", "") if isinstance(answer, dict) else ""
+                    if question or answer: faq_evidence.append(str(question) + " " + str(answer))
+    page_text = "\n".join(p.get("text", "") for p in pages if p.get("page_type") != "policy") + "\n" + "\n".join(faq_evidence)
+    service_values = []
+    for node in business_nodes:
+        for key in ("makesOffer", "hasOfferCatalog", "knowsAbout"):
+            value = node.get(key); items = value if isinstance(value, list) else [value] if value else []
+            for item in items:
+                if isinstance(item, dict):
+                    offer_item = item.get("itemOffered")
+                    item = item.get("name") or (offer_item.get("name") if isinstance(offer_item, dict) else "")
+                if item: service_values.append(clean(item, 180))
     service_lines = []
-    for line in all_text.splitlines():
-        line = " ".join(line.split()).strip(" •-\t")
-        if 4 <= len(line) <= 180 and re.search(r"\b(service|services|we offer|speciali[sz]e|our work|solutions)\b", line, re.I):
-            service_lines.append(line)
-    return {
-        "business_name": business_name[:180],
-        "industry": "",
-        "target_customers": "",
-        "offer": (description or " ".join(dict.fromkeys(service_lines)) or "")[:1000],
-        "brand_voice": "",
-    }
+    for page in pages:
+        if page.get("page_type") not in {"services", "home", "about"}: continue
+        for line in page.get("text", "").splitlines():
+            line = " ".join(line.split()).strip(" •-\t")
+            if 8 <= len(line) <= 180 and not re.search(r"\bon\s+.{1,60}\s+safeNestT\b|all-in-one|safeguarding your|\b(home|team|company profile)\s*$", line, re.I) and re.search(r"\b(cleaning|repair|installation|consulting|service|services|we offer|speciali[sz]e|our work|solutions|products|support|booking|design|maintenance|care|security|software|platform)\b", line, re.I):
+                if line.lower() not in {x.lower() for x in service_lines}: service_lines.append(line)
+    if description and not service_values and not service_lines:
+        match = re.search(r"\b(?:covers|offers|provides|includes|features)\s+(.+?)(?:\s+in\s+\d+\s+pages?|[.!]|$)", description, re.I)
+        if match:
+            feature_text = match.group(1).strip(" .")
+            parts = re.split(r",\s*|\s+and\s+", feature_text)
+            service_values.extend(x.strip().removeprefix("and ").strip() for x in parts if 2 <= len(x.strip()) <= 100)
+    offer = description or "; ".join(dict.fromkeys(service_values + service_lines))
+    email_candidates = set(re.findall(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", page_text, re.I))
+    phone_candidates = set(re.findall(r"(?<!\w)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\w)", page_text))
+    for page in pages:
+        for href in page.get("contact_hrefs", []):
+            if href.lower().startswith("mailto:"): email_candidates.add(href[7:].split("?", 1)[0])
+            if href.lower().startswith("tel:"): phone_candidates.add(href[4:].split("?", 1)[0])
+    phone_candidates.update(jsonld_values("telephone"))
+    emails = sorted(email_candidates)[:12]
+    phones = sorted(phone_candidates)[:12]
+    pricing = []
+    for page in pages:
+        if page.get("page_type") == "pricing": pricing.extend(line.strip() for line in page.get("text", "").splitlines() if re.search(r"(?:\$|USD\s*)\d|per (?:hour|visit|month|project)|starting at|from \$", line, re.I))
+    industry = clean(primary.get("additionalType"), 180)
+    copy_lower = (page_text + " " + description).lower()
+    industry_inferred = False
+    if not industry and re.search(r"cybersecurity|cyber security|threat intel|password vault|online safety|privacy platform", copy_lower):
+        industry = "Cybersecurity and privacy software"; industry_inferred = True
+    elif not industry and re.search(r"cleaning service|house cleaning|move-out cleaning", copy_lower):
+        industry = "Cleaning services"; industry_inferred = True
+    elif not industry and re.search(r"consulting|consultant", copy_lower):
+        industry = "Consulting"; industry_inferred = True
+    elif not industry and re.search(r"plumbing|hvac|electrical contractor", copy_lower):
+        industry = "Home services"; industry_inferred = True
+    target_customers = ""
+    audience_inferred = False
+    if re.search(r"famil(?:y|ies)|parent|family invite", copy_lower):
+        target_customers = "Individuals and families"; audience_inferred = True
+    elif re.search(r"small business|business owners|business teams", copy_lower):
+        target_customers = "Small businesses"; audience_inferred = True
+    elif re.search(r"homeowners|residential homes", copy_lower):
+        target_customers = "Homeowners and residential customers"; audience_inferred = True
+    profile = {"business_name": business_name, "industry": industry, "target_customers": target_customers, "offer": offer[:1000], "brand_voice": ""}
+    facts = {"summary": description, "field_confidence": {"business_name": "high" if business_name else "not found", "industry": "inferred" if industry_inferred else ("high" if industry else "not found"), "target_customers": "inferred" if audience_inferred else "not found", "offer": "medium" if offer else "not found", "brand_voice": "not reliably inferred from website copy"}, "field_evidence": {"industry": "Industry suggestion is inferred from public-site keywords; confirm it before use." if industry_inferred else "Industry should be based on explicit structured or profile content.", "target_customers": "Audience suggestion is inferred from public-site language; confirm it before use." if audience_inferred else "No explicit audience statement was found."}, "services": list(dict.fromkeys(service_values + service_lines))[:20], "contact": {"emails": emails, "phones": phones, "addresses": jsonld_values("address")[:5], "hours": jsonld_values("openingHours")[:10]}, "pricing_mentions": list(dict.fromkeys(pricing))[:15], "pages_by_type": {kind: sum(1 for p in pages if p.get("page_type") == kind) for kind in ("home", "about", "services", "pricing", "contact", "faq", "policy", "other", "article")}, "structured_data_found": bool(business_nodes), "structured_business_types": list(dict.fromkeys(clean(x, 80) for node in business_nodes for x in ([node.get("@type")] if isinstance(node.get("@type"), str) else node.get("@type", []))))[:10]}
+    inventory = [{"url": p.get("url", ""), "title": p.get("title", ""), "type": p.get("page_type", "other")} for p in pages]
+    return profile, facts, inventory
 
 
 class WebsiteScanRequest(BaseModel):
@@ -188,6 +322,7 @@ class WebsiteScanRequest(BaseModel):
 
 class WebsiteProfileApproval(BaseModel):
     fields: list[str] = Field(default_factory=lambda: list(PROFILE_FIELDS), max_length=len(PROFILE_FIELDS))
+    overrides: dict[str, str] = Field(default_factory=dict)
 
 
 def create_router(auth_dependency):
@@ -209,7 +344,7 @@ def create_router(auth_dependency):
         parsed = urlparse(raw_url)
         root_host = parsed.hostname.lower()
         root_url = f"{parsed.scheme}://{parsed.netloc}/"
-        queue = [raw_url]
+        queue = [raw_url if parsed.path else root_url]
         seen = set()
         pages = []
         errors = []
@@ -241,10 +376,10 @@ def create_router(auth_dependency):
         if not pages:
             raise HTTPException(status_code=422, detail="MIA could not read public HTML pages from this website. It may block automated access or require JavaScript.")
         domain = root_host
-        profile = _derive_profile(pages, domain)
+        profile, facts, inventory = _derive_profile(pages, domain)
         scan_id, now = uuid.uuid4().hex, time.time()
         # Persist bounded page evidence and extracted candidate fields for this account only.
-        safe_pages = [{"url": p["url"], "title": p["title"], "text": p["text"][:8000], "meta": p["meta"]} for p in pages]
+        safe_pages = [{"url": p["url"], "title": p["title"], "text": p["text"][:8000], "meta": p["meta"], "page_type": p.get("page_type", "other"), "headings": p.get("headings", [])[:40]} for p in pages]
         conn = _db()
         try:
             _ensure_table(conn)
@@ -255,9 +390,9 @@ def create_router(auth_dependency):
             conn.close()
         return {
             "scan_id": scan_id, "domain": domain, "status": "review",
-            "pages_crawled": len(pages), "pages": [{"url": p["url"], "title": p["title"]} for p in pages],
-            "profile_suggestions": profile,
-            "sources": [{"url": p["url"], "title": p["title"]} for p in pages],
+            "pages_crawled": len(pages), "pages": inventory,
+            "profile_suggestions": profile, "business_facts": facts,
+            "sources": inventory,
             "warnings": errors[:20],
             "note": "Extracted content is unverified until you review and approve it. Pages may contain inaccurate or outdated claims.",
         }
@@ -284,8 +419,11 @@ def create_router(auth_dependency):
         if not re.fullmatch(r"[a-f0-9]{32}", scan_id):
             raise HTTPException(status_code=400, detail="Invalid scan id")
         selected = set(payload.fields)
-        if not selected.issubset(PROFILE_FIELDS):
+        if not selected.issubset(PROFILE_FIELDS) or not set(payload.overrides).issubset(PROFILE_FIELDS):
             raise HTTPException(status_code=422, detail="Unsupported profile field")
+        for key, value in payload.overrides.items():
+            if not isinstance(value, str) or len(value) > PROFILE_FIELDS[key]:
+                raise HTTPException(status_code=422, detail=f"Invalid value for {key}")
         conn = _db()
         try:
             _ensure_table(conn)
@@ -297,6 +435,7 @@ def create_router(auth_dependency):
                 raise HTTPException(status_code=409, detail="This scan has already been approved")
             candidate = json.loads(row[2])
             existing = get_business_profile(str(user["id"]))
+            for key, value in payload.overrides.items(): candidate[key] = value.strip()
             merged = {k: (candidate.get(k, "") if k in selected and candidate.get(k, "") else existing.get(k, "")) for k in PROFILE_FIELDS}
             now = time.time()
             conn.execute("""INSERT INTO business_profiles(user_id,business_name,industry,target_customers,offer,goals,brand_voice,constraints,updated_at)
