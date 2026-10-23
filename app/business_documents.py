@@ -420,7 +420,7 @@ def _invoice_markdown_as_structured(title: str, content: str) -> str | None:
         "additional_notes": field(r"Notes:\s*([^\n]+)"),
     }
     # Extract service names and details from numbered or bulleted AI invoice templates.
-    sections = re.split(r"(?im)^\s*(?:\d+\.\s*)?\*\*Service\s+\d+\s*:\s*", plain)
+    sections = re.split(r"(?im)^\s*(?:\d+\.\s*)?\*\*Service\s+\d+\s*:\*\*\s*", plain)
     for section in sections[1:]:
         name_match = re.match(r"([^*\n]+)\*\*?", section)
         if not name_match:
